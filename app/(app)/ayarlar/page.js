@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { toast } from 'sonner'
+import { ImageUpload } from '@/components/image-upload'
 
 const fetcher = (u) => fetch(u).then(r => r.json())
 
@@ -37,7 +38,10 @@ export default function SettingsPage() {
           <div className="sm:col-span-2"><Label>Adres</Label><Textarea rows={2} value={form.address || ''} onChange={e => setForm({ ...form, address: e.target.value })} /></div>
           <div><Label>Para Birimi</Label><Input value={form.currency || 'TRY'} onChange={e => setForm({ ...form, currency: e.target.value })} /></div>
           <div><Label>Fatura Ön Eki</Label><Input value={form.invoice_prefix || ''} onChange={e => setForm({ ...form, invoice_prefix: e.target.value })} /></div>
-          <div className="sm:col-span-2"><Label>Logo URL</Label><Input value={form.logo_url || ''} onChange={e => setForm({ ...form, logo_url: e.target.value })} placeholder="https://..." /></div>
+          <div className="sm:col-span-2">
+            <Label>Şirket Logosu</Label>
+            <ImageUpload value={form.logo_url} onChange={(url) => setForm({ ...form, logo_url: url })} bucket="company-logos" folder="" label="Logo Yükle" />
+          </div>
         </div>
         <Button onClick={save} className="bg-emerald-600 hover:bg-emerald-700">Kaydet</Button>
       </CardContent>

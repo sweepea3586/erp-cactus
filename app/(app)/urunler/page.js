@@ -11,6 +11,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Plus, Search, Pencil, Trash2, PackagePlus, PackageMinus } from 'lucide-react'
 import { formatTRY, formatNumber } from '@/lib/format'
 import { toast } from 'sonner'
+import { ImageUpload } from '@/components/image-upload'
 
 const fetcher = (u) => fetch(u).then(r => r.json())
 const empty = { sku: '', barcode: '', name: '', brand: '', category_id: '', purchase_price: '', selling_price: '', stock: '', min_stock: '', warehouse_location: '', image_url: '' }
@@ -133,7 +134,10 @@ export default function ProductsPage() {
             {!editing && <div><Label>Açılış Stok</Label><Input type="number" value={form.stock} onChange={e => setForm({ ...form, stock: e.target.value })} /></div>}
             <div><Label>Min. Stok</Label><Input type="number" value={form.min_stock} onChange={e => setForm({ ...form, min_stock: e.target.value })} /></div>
             <div className="sm:col-span-2"><Label>Depo Konumu</Label><Input value={form.warehouse_location} onChange={e => setForm({ ...form, warehouse_location: e.target.value })} placeholder="Ör: A-01-03" /></div>
-            <div className="sm:col-span-2"><Label>Görsel URL</Label><Input value={form.image_url} onChange={e => setForm({ ...form, image_url: e.target.value })} placeholder="https://..." /></div>
+            <div className="sm:col-span-2">
+              <Label>Ürün Görseli</Label>
+              <ImageUpload value={form.image_url} onChange={(url) => setForm({ ...form, image_url: url })} bucket="product-images" folder="products" label="Görsel Yükle" />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setOpen(false)}>Vazgeç</Button>

@@ -1,10 +1,5 @@
 import { NextResponse } from 'next/server'
-import { v4 as uuidv4 } from 'uuid'
-import { getDb } from '@/lib/db'
-import {
-  verifyPassword, hashPassword, setSessionCookie,
-  clearSessionCookie, getCurrentUser,
-} from '@/lib/auth'
+import { createClient, getCurrentUser } from '@/lib/supabase/server'
 
 function cors(res) {
   res.headers.set('Access-Control-Allow-Origin', process.env.CORS_ORIGINS || '*')
@@ -13,30 +8,9 @@ function cors(res) {
   res.headers.set('Access-Control-Allow-Credentials', 'true')
   return res
 }
-
 function ok(data, status = 200) { return cors(NextResponse.json(data, { status })) }
 function fail(message, status = 400) { return cors(NextResponse.json({ error: message }, { status })) }
-function clean(doc) { if (!doc) return doc; const { _id, password_hash, ...r } = doc; return r }
-function cleanList(list) { return list.map(clean) }
-
 export async function OPTIONS() { return cors(new NextResponse(null, { status: 200 })) }
-
-async function nextInvoiceNumber(db) {
-  const settings = await db.collection('settings').findOne({ id: 'company' })
-  const prefix = settings?.invoice_prefix || 'CLS'
-  const counter = (settings?.invoice_counter || 1000) + 1
-  await db.collection('settings').updateOne({ id: 'company' }, { $set: { invoice_counter: counter } })
-  const year = new Date().getFullYear()
-  return `${prefix}-${year}-${String(counter).padStart(5, '0')}`
-}
-
-async function logStockMovement(db, payload) {
-  await db.collection('stock_movements').insertOne({
-    id: uuidv4(),
-    created_at: new Date(),
-    ...payload,
-  })
-}
 
 async function handle(request, { params }) {
   const { path = [] } = params
@@ -44,22 +18,32 @@ async function handle(request, { params }) {
   const method = request.method
 
   try {
-    const db = await getDb()
+    const supabase = createClient()
 
-    // ===================== AUTH =====================
+    // ============== AUTH ==============
     if (route === '/auth/login' && method === 'POST') {
-      const { username, password } = await request.json()
-      if (!username || !password) return fail('Kullanıcı adı ve şifre zorunludur')
-      const user = await db.collection('users').findOne({ username })
-      if (!user || !verifyPassword(password, user.password_hash)) {
-        return fail('Hatalı kullanıcı adı veya şifre', 401)
-      }
-      setSessionCookie(user.id)
-      return ok({ user: clean(user) })
+      const { email, password } = await request.json()
+      if (!email || !password) return fail('E-posta ve şifre zorunludur')
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+      if (error) return fail(error.message || 'Giriş başarısız', 401)
+      // Get profile
+      const { data: profile } = await supabase.from('users').select('*').eq('id', data.user.id).maybeSingle()
+      return ok({ user: profile || { id: data.user.id, email: data.user.email, role: 'staff', full_name: data.user.email } })
+    }
+
+    if (route === '/auth/signup' && method === 'POST') {
+      const { email, password, full_name } = await request.json()
+      if (!email || !password) return fail('E-posta ve şifre zorunludur')
+      const { data, error } = await supabase.auth.signUp({
+        email, password,
+        options: { data: { full_name: full_name || email.split('@')[0], role: 'staff' } },
+      })
+      if (error) return fail(error.message, 400)
+      return ok({ user: data.user })
     }
 
     if (route === '/auth/logout' && method === 'POST') {
-      clearSessionCookie()
+      await supabase.auth.signOut()
       return ok({ success: true })
     }
 
@@ -69,237 +53,244 @@ async function handle(request, { params }) {
       return ok({ user })
     }
 
-    // Protect everything below
+    // ============== AUTH GUARD ==============
     const me = await getCurrentUser()
     if (!me) return fail('Unauthorized', 401)
 
-    // ===================== DASHBOARD =====================
+    // ============== DASHBOARD ==============
     if (route === '/dashboard/stats' && method === 'GET') {
-      const products = await db.collection('products').find({}).toArray()
-      const totalStockValue = products.reduce((s, p) => s + (p.purchase_price || 0) * (p.stock || 0), 0)
+      const [{ data: products = [] }, { data: customers = [] }, { data: sales = [] }] = await Promise.all([
+        supabase.from('products').select('*'),
+        supabase.from('customers').select('*'),
+        supabase.from('sales').select('*').order('created_at', { ascending: false }),
+      ])
+      const totalStockValue = products.reduce((s, p) => s + Number(p.purchase_price || 0) * Number(p.stock || 0), 0)
       const totalProducts = products.length
-      const lowStock = products.filter(p => (p.stock || 0) <= (p.min_stock || 0))
-      const totalCustomers = await db.collection('customers').countDocuments()
-      const customers = await db.collection('customers').find({}).toArray()
-      const totalReceivables = customers.reduce((s, c) => s + (c.balance || 0), 0)
+      const totalCustomers = customers.length
+      const totalReceivables = customers.reduce((s, c) => s + Number(c.balance || 0), 0)
+      const lowStock = products.filter(p => Number(p.stock || 0) <= Number(p.min_stock || 0))
 
-      const startOfMonth = new Date()
-      startOfMonth.setDate(1); startOfMonth.setHours(0, 0, 0, 0)
-      const sales = await db.collection('sales').find({}).sort({ created_at: -1 }).toArray()
+      const startOfMonth = new Date(); startOfMonth.setDate(1); startOfMonth.setHours(0, 0, 0, 0)
       const monthlySales = sales.filter(s => new Date(s.created_at) >= startOfMonth)
-        .reduce((s, x) => s + (x.total || 0), 0)
+        .reduce((s, x) => s + Number(x.total || 0), 0)
 
-      // Daily series for last 30 days
       const series = []
       for (let i = 29; i >= 0; i--) {
         const day = new Date(); day.setHours(0, 0, 0, 0); day.setDate(day.getDate() - i)
         const next = new Date(day); next.setDate(next.getDate() + 1)
         const total = sales.filter(s => new Date(s.created_at) >= day && new Date(s.created_at) < next)
-          .reduce((sum, x) => sum + (x.total || 0), 0)
+          .reduce((sum, x) => sum + Number(x.total || 0), 0)
         series.push({ date: day.toISOString().slice(0, 10), total })
       }
 
-      const recentSales = sales.slice(0, 5).map(clean)
       return ok({
-        totalStockValue, totalProducts, totalCustomers, monthlySales,
-        totalReceivables, lowStockCount: lowStock.length,
-        lowStock: cleanList(lowStock).slice(0, 10),
-        recentSales, series,
+        totalStockValue, totalProducts, totalCustomers,
+        monthlySales, totalReceivables,
+        lowStockCount: lowStock.length,
+        lowStock: lowStock.slice(0, 10),
+        recentSales: sales.slice(0, 5),
+        series,
       })
     }
 
-    // ===================== CATEGORIES =====================
+    // ============== CATEGORIES ==============
     if (route === '/categories' && method === 'GET') {
-      const items = await db.collection('categories').find({}).sort({ name: 1 }).toArray()
-      return ok(cleanList(items))
+      const { data, error } = await supabase.from('categories').select('*').order('name')
+      if (error) return fail(error.message)
+      return ok(data || [])
     }
     if (route === '/categories' && method === 'POST') {
-      const body = await request.json()
-      const item = { id: uuidv4(), name: body.name, created_at: new Date() }
-      await db.collection('categories').insertOne(item)
-      return ok(clean(item))
+      const b = await request.json()
+      const { data, error } = await supabase.from('categories').insert({ name: b.name }).select().single()
+      if (error) return fail(error.message)
+      return ok(data)
     }
 
-    // ===================== PRODUCTS =====================
+    // ============== PRODUCTS ==============
     if (route === '/products' && method === 'GET') {
       const url = new URL(request.url)
       const q = url.searchParams.get('q')
-      const filter = q ? { $or: [
-        { name: { $regex: q, $options: 'i' } },
-        { sku: { $regex: q, $options: 'i' } },
-        { barcode: { $regex: q, $options: 'i' } },
-        { brand: { $regex: q, $options: 'i' } },
-      ] } : {}
-      const items = await db.collection('products').find(filter).sort({ created_at: -1 }).toArray()
-      return ok(cleanList(items))
+      let query = supabase.from('products').select('*, categories(name)').order('created_at', { ascending: false })
+      if (q) query = query.or(`name.ilike.%${q}%,sku.ilike.%${q}%,barcode.ilike.%${q}%,brand.ilike.%${q}%`)
+      const { data, error } = await query
+      if (error) return fail(error.message)
+      const flat = (data || []).map(p => ({ ...p, category_name: p.categories?.name || '' }))
+      return ok(flat)
     }
     if (route === '/products' && method === 'POST') {
       const b = await request.json()
       if (!b.name || !b.sku) return fail('Ad ve SKU zorunlu')
-      const cat = b.category_id ? await db.collection('categories').findOne({ id: b.category_id }) : null
-      const item = {
-        id: uuidv4(),
-        sku: b.sku, barcode: b.barcode || '',
-        name: b.name, brand: b.brand || '',
-        category_id: b.category_id || null, category_name: cat?.name || '',
+      const payload = {
+        sku: b.sku, barcode: b.barcode || null,
+        name: b.name, brand: b.brand || null,
+        category_id: b.category_id || null,
         purchase_price: Number(b.purchase_price || 0),
         selling_price: Number(b.selling_price || 0),
         stock: Number(b.stock || 0),
         min_stock: Number(b.min_stock || 0),
-        warehouse_location: b.warehouse_location || '',
-        image_url: b.image_url || '',
-        created_at: new Date(),
+        warehouse_location: b.warehouse_location || null,
+        image_url: b.image_url || null,
       }
-      await db.collection('products').insertOne(item)
-      if (item.stock > 0) {
-        await logStockMovement(db, {
-          product_id: item.id, product_name: item.name, type: 'in',
-          quantity: item.stock, reason: 'Açılış stok', user_id: me.id, user_name: me.full_name,
+      const { data, error } = await supabase.from('products').insert(payload).select().single()
+      if (error) return fail(error.message)
+      if (data.stock > 0) {
+        await supabase.from('stock_movements').insert({
+          product_id: data.id, product_name: data.name, type: 'in',
+          quantity: data.stock, reason: 'Açılış stok',
+          user_id: me.id, user_name: me.full_name, after_qty: data.stock,
         })
       }
-      return ok(clean(item))
+      return ok(data)
     }
     if (route.startsWith('/products/') && method === 'GET') {
       const id = route.split('/')[2]
       const sub = route.split('/')[3]
       if (sub === 'movements') {
-        const items = await db.collection('stock_movements').find({ product_id: id }).sort({ created_at: -1 }).toArray()
-        return ok(cleanList(items))
+        const { data, error } = await supabase.from('stock_movements').select('*').eq('product_id', id).order('created_at', { ascending: false })
+        if (error) return fail(error.message)
+        return ok(data || [])
       }
-      const item = await db.collection('products').findOne({ id })
-      if (!item) return fail('Bulunamadı', 404)
-      return ok(clean(item))
+      const { data, error } = await supabase.from('products').select('*').eq('id', id).maybeSingle()
+      if (error) return fail(error.message)
+      if (!data) return fail('Bulunamadı', 404)
+      return ok(data)
     }
     if (route.startsWith('/products/') && method === 'PUT') {
       const id = route.split('/')[2]
       const b = await request.json()
-      const cat = b.category_id ? await db.collection('categories').findOne({ id: b.category_id }) : null
-      const update = {
-        sku: b.sku, barcode: b.barcode || '',
-        name: b.name, brand: b.brand || '',
-        category_id: b.category_id || null, category_name: cat?.name || '',
+      const payload = {
+        sku: b.sku, barcode: b.barcode || null,
+        name: b.name, brand: b.brand || null,
+        category_id: b.category_id || null,
         purchase_price: Number(b.purchase_price || 0),
         selling_price: Number(b.selling_price || 0),
         min_stock: Number(b.min_stock || 0),
-        warehouse_location: b.warehouse_location || '',
-        image_url: b.image_url || '',
-        updated_at: new Date(),
+        warehouse_location: b.warehouse_location || null,
+        image_url: b.image_url || null,
+        updated_at: new Date().toISOString(),
       }
-      await db.collection('products').updateOne({ id }, { $set: update })
+      const { error } = await supabase.from('products').update(payload).eq('id', id)
+      if (error) return fail(error.message)
       return ok({ success: true })
     }
     if (route.startsWith('/products/') && method === 'DELETE') {
       const id = route.split('/')[2]
-      await db.collection('products').deleteOne({ id })
+      const { error } = await supabase.from('products').delete().eq('id', id)
+      if (error) return fail(error.message)
       return ok({ success: true })
     }
 
-    // ===================== STOCK ADJUSTMENT =====================
+    // ============== STOCK ADJUST ==============
     if (route === '/stock/adjust' && method === 'POST') {
       const b = await request.json()
-      const p = await db.collection('products').findOne({ id: b.product_id })
+      const { data: p } = await supabase.from('products').select('*').eq('id', b.product_id).maybeSingle()
       if (!p) return fail('Ürün bulunamadı', 404)
       const qty = Number(b.quantity || 0)
-      const type = b.type // 'in' | 'out' | 'adjust'
-      let newStock = p.stock
+      const type = b.type
+      let newStock = Number(p.stock)
       if (type === 'in') newStock += qty
       else if (type === 'out') newStock -= qty
       else if (type === 'adjust') newStock = qty
       if (newStock < 0) return fail('Stok negatif olamaz')
-      await db.collection('products').updateOne({ id: p.id }, { $set: { stock: newStock } })
-      await logStockMovement(db, {
+      const { error: e1 } = await supabase.from('products').update({ stock: newStock, updated_at: new Date().toISOString() }).eq('id', p.id)
+      if (e1) return fail(e1.message)
+      await supabase.from('stock_movements').insert({
         product_id: p.id, product_name: p.name, type, quantity: qty,
         reason: b.reason || (type === 'in' ? 'Stok girişi' : type === 'out' ? 'Stok çıkışı' : 'Stok sayımı'),
-        user_id: me.id, user_name: me.full_name, before: p.stock, after: newStock,
+        user_id: me.id, user_name: me.full_name, before_qty: Number(p.stock), after_qty: newStock,
       })
       return ok({ success: true, stock: newStock })
     }
 
     if (route === '/stock/movements' && method === 'GET') {
-      const items = await db.collection('stock_movements').find({}).sort({ created_at: -1 }).limit(500).toArray()
-      return ok(cleanList(items))
+      const { data, error } = await supabase.from('stock_movements').select('*').order('created_at', { ascending: false }).limit(500)
+      if (error) return fail(error.message)
+      return ok(data || [])
     }
 
-    // ===================== CUSTOMERS =====================
+    // ============== CUSTOMERS ==============
     if (route === '/customers' && method === 'GET') {
       const url = new URL(request.url)
       const q = url.searchParams.get('q')
-      const filter = q ? { $or: [
-        { company_name: { $regex: q, $options: 'i' } },
-        { contact_person: { $regex: q, $options: 'i' } },
-        { phone: { $regex: q, $options: 'i' } },
-      ] } : {}
-      const items = await db.collection('customers').find(filter).sort({ company_name: 1 }).toArray()
-      return ok(cleanList(items))
+      let query = supabase.from('customers').select('*').order('company_name')
+      if (q) query = query.or(`company_name.ilike.%${q}%,contact_person.ilike.%${q}%,phone.ilike.%${q}%`)
+      const { data, error } = await query
+      if (error) return fail(error.message)
+      return ok(data || [])
     }
     if (route === '/customers' && method === 'POST') {
       const b = await request.json()
       if (!b.company_name) return fail('Firma adı zorunlu')
-      const item = {
-        id: uuidv4(),
+      const payload = {
         company_name: b.company_name,
-        contact_person: b.contact_person || '',
-        phone: b.phone || '', email: b.email || '', address: b.address || '',
-        tax_office: b.tax_office || '', tax_number: b.tax_number || '',
-        balance: Number(b.balance || 0), notes: b.notes || '',
-        created_at: new Date(),
+        contact_person: b.contact_person || null,
+        phone: b.phone || null, email: b.email || null, address: b.address || null,
+        tax_office: b.tax_office || null, tax_number: b.tax_number || null,
+        balance: Number(b.balance || 0), notes: b.notes || null,
       }
-      await db.collection('customers').insertOne(item)
-      return ok(clean(item))
+      const { data, error } = await supabase.from('customers').insert(payload).select().single()
+      if (error) return fail(error.message)
+      return ok(data)
     }
     if (route.startsWith('/customers/') && method === 'GET') {
       const id = route.split('/')[2]
       const sub = route.split('/')[3]
       if (sub === 'transactions') {
-        const items = await db.collection('customer_transactions').find({ customer_id: id }).sort({ created_at: -1 }).toArray()
-        return ok(cleanList(items))
+        const { data, error } = await supabase.from('customer_transactions').select('*').eq('customer_id', id).order('created_at', { ascending: false })
+        if (error) return fail(error.message)
+        return ok(data || [])
       }
-      const item = await db.collection('customers').findOne({ id })
-      if (!item) return fail('Bulunamadı', 404)
-      return ok(clean(item))
+      const { data, error } = await supabase.from('customers').select('*').eq('id', id).maybeSingle()
+      if (error) return fail(error.message)
+      if (!data) return fail('Bulunamadı', 404)
+      return ok(data)
     }
     if (route.startsWith('/customers/') && method === 'PUT') {
       const id = route.split('/')[2]
       const b = await request.json()
-      const update = {
+      const payload = {
         company_name: b.company_name,
-        contact_person: b.contact_person || '',
-        phone: b.phone || '', email: b.email || '', address: b.address || '',
-        tax_office: b.tax_office || '', tax_number: b.tax_number || '',
-        notes: b.notes || '',
-        updated_at: new Date(),
+        contact_person: b.contact_person || null,
+        phone: b.phone || null, email: b.email || null, address: b.address || null,
+        tax_office: b.tax_office || null, tax_number: b.tax_number || null,
+        notes: b.notes || null,
+        updated_at: new Date().toISOString(),
       }
-      await db.collection('customers').updateOne({ id }, { $set: update })
+      const { error } = await supabase.from('customers').update(payload).eq('id', id)
+      if (error) return fail(error.message)
       return ok({ success: true })
     }
     if (route.startsWith('/customers/') && method === 'DELETE') {
       const id = route.split('/')[2]
-      await db.collection('customers').deleteOne({ id })
+      const { error } = await supabase.from('customers').delete().eq('id', id)
+      if (error) return fail(error.message)
       return ok({ success: true })
     }
 
-    // ===================== SALES =====================
+    // ============== SALES ==============
     if (route === '/sales' && method === 'GET') {
-      const items = await db.collection('sales').find({}).sort({ created_at: -1 }).toArray()
-      return ok(cleanList(items))
+      const { data, error } = await supabase.from('sales').select('*, sale_items(*)').order('created_at', { ascending: false })
+      if (error) return fail(error.message)
+      const sales = (data || []).map(s => ({ ...s, items: s.sale_items || [] }))
+      return ok(sales)
     }
     if (route === '/sales' && method === 'POST') {
       const b = await request.json()
-      const customer = await db.collection('customers').findOne({ id: b.customer_id })
+      const { data: customer } = await supabase.from('customers').select('*').eq('id', b.customer_id).maybeSingle()
       if (!customer) return fail('Müşteri bulunamadı', 400)
       if (!Array.isArray(b.items) || b.items.length === 0) return fail('En az bir ürün ekleyin')
 
-      // Validate stock
+      // Validate stock + build line items
       const enriched = []
       for (const it of b.items) {
-        const p = await db.collection('products').findOne({ id: it.product_id })
+        const { data: p } = await supabase.from('products').select('*').eq('id', it.product_id).maybeSingle()
         if (!p) return fail('Ürün bulunamadı: ' + it.product_id)
         const qty = Number(it.quantity || 0)
-        if (qty <= 0) return fail('Adet 0\'dan büyük olmalı: ' + p.name)
-        if (qty > p.stock) return fail(`Yetersiz stok: ${p.name} (mevcut: ${p.stock})`)
+        if (qty <= 0) return fail("Adet 0'dan büyük olmalı: " + p.name)
+        if (qty > Number(p.stock)) return fail(`Yetersiz stok: ${p.name} (mevcut: ${p.stock})`)
         const unit_price = Number(it.unit_price ?? p.selling_price)
         const discount = Number(it.discount || 0)
-        const line_total = (unit_price * qty) * (1 - discount / 100)
+        const line_total = unit_price * qty * (1 - discount / 100)
         enriched.push({
           product_id: p.id, product_sku: p.sku, product_name: p.name,
           quantity: qty, unit_price, discount, line_total,
@@ -313,105 +304,79 @@ async function handle(request, { params }) {
       const paid = Number(b.paid || 0)
       const due = total - paid
 
-      const invoice_number = await nextInvoiceNumber(db)
-      const sale = {
-        id: uuidv4(),
+      // Generate invoice number
+      const { data: invData, error: invErr } = await supabase.rpc('next_invoice_number')
+      if (invErr) return fail('Fatura numarası üretilemedi: ' + invErr.message)
+      const invoice_number = invData
+
+      // Insert sale (trigger updates customer balance)
+      const { data: sale, error: saleErr } = await supabase.from('sales').insert({
         invoice_number,
         customer_id: customer.id,
         customer_name: customer.company_name,
-        items: enriched,
-        subtotal, tax_rate: taxRate, tax, total,
-        paid, due,
-        notes: b.notes || '',
+        subtotal, tax_rate: taxRate, tax, total, paid, due,
+        notes: b.notes || null,
         user_id: me.id, user_name: me.full_name,
-        created_at: new Date(),
-      }
-      await db.collection('sales').insertOne(sale)
+      }).select().single()
+      if (saleErr) return fail(saleErr.message)
 
-      // Update stock
-      for (const it of enriched) {
-        const p = await db.collection('products').findOne({ id: it.product_id })
-        const newStock = p.stock - it.quantity
-        await db.collection('products').updateOne({ id: it.product_id }, { $set: { stock: newStock } })
-        await logStockMovement(db, {
-          product_id: it.product_id, product_name: it.product_name,
-          type: 'out', quantity: it.quantity,
-          reason: `Satış: ${invoice_number}`, reference_id: sale.id,
-          user_id: me.id, user_name: me.full_name, before: p.stock, after: newStock,
-        })
+      // Insert sale_items (triggers update stock + movements)
+      const itemsPayload = enriched.map(it => ({ ...it, sale_id: sale.id }))
+      const { error: itemsErr } = await supabase.from('sale_items').insert(itemsPayload)
+      if (itemsErr) {
+        // rollback
+        await supabase.from('sales').delete().eq('id', sale.id)
+        return fail(itemsErr.message)
       }
 
-      // Update customer balance
-      const newBalance = (customer.balance || 0) + due
-      await db.collection('customers').updateOne({ id: customer.id }, { $set: { balance: newBalance } })
-      await db.collection('customer_transactions').insertOne({
-        id: uuidv4(), customer_id: customer.id,
-        type: 'sale', amount: total,
-        reference_id: sale.id, reference_number: invoice_number,
-        description: `Satış Faturası ${invoice_number}`,
-        balance_after: newBalance,
-        created_at: new Date(),
-      })
+      // Record payment if any (trigger subtracts from balance)
       if (paid > 0) {
-        await db.collection('payments').insertOne({
-          id: uuidv4(), customer_id: customer.id,
-          amount: paid, reference_id: sale.id, reference_number: invoice_number,
-          method: 'cash', notes: 'Satışla birlikte tahsilat',
-          user_id: me.id, user_name: me.full_name, created_at: new Date(),
-        })
-        await db.collection('customer_transactions').insertOne({
-          id: uuidv4(), customer_id: customer.id,
-          type: 'payment', amount: -paid,
-          reference_id: sale.id, reference_number: invoice_number,
-          description: `Tahsilat ${invoice_number}`,
-          balance_after: newBalance,
-          created_at: new Date(),
+        await supabase.from('payments').insert({
+          customer_id: customer.id, amount: paid,
+          method: 'cash', reference_id: sale.id, reference_number: invoice_number,
+          notes: 'Satışla birlikte tahsilat',
+          user_id: me.id, user_name: me.full_name,
         })
       }
 
-      return ok(clean(sale))
+      return ok({ ...sale, items: enriched })
     }
     if (route.startsWith('/sales/') && method === 'GET') {
       const id = route.split('/')[2]
-      const item = await db.collection('sales').findOne({ id })
-      if (!item) return fail('Bulunamadı', 404)
-      const customer = await db.collection('customers').findOne({ id: item.customer_id })
-      const settings = await db.collection('settings').findOne({ id: 'company' })
-      return ok({ sale: clean(item), customer: clean(customer), settings: clean(settings) })
+      const { data: sale, error } = await supabase.from('sales').select('*, sale_items(*)').eq('id', id).maybeSingle()
+      if (error) return fail(error.message)
+      if (!sale) return fail('Bulunamadı', 404)
+      const { data: customer } = await supabase.from('customers').select('*').eq('id', sale.customer_id).maybeSingle()
+      const { data: settings } = await supabase.from('settings').select('*').eq('id', 'company').maybeSingle()
+      return ok({ sale: { ...sale, items: sale.sale_items || [] }, customer, settings })
     }
 
-    // ===================== PAYMENTS =====================
+    // ============== PAYMENTS ==============
     if (route === '/payments' && method === 'POST') {
       const b = await request.json()
-      const customer = await db.collection('customers').findOne({ id: b.customer_id })
-      if (!customer) return fail('Müşteri bulunamadı', 404)
       const amount = Number(b.amount || 0)
       if (amount <= 0) return fail('Tutar geçersiz')
-      const payment = {
-        id: uuidv4(), customer_id: customer.id,
-        amount, method: b.method || 'cash', notes: b.notes || '',
-        user_id: me.id, user_name: me.full_name, created_at: new Date(),
-      }
-      await db.collection('payments').insertOne(payment)
-      const newBalance = (customer.balance || 0) - amount
-      await db.collection('customers').updateOne({ id: customer.id }, { $set: { balance: newBalance } })
-      await db.collection('customer_transactions').insertOne({
-        id: uuidv4(), customer_id: customer.id,
-        type: 'payment', amount: -amount,
-        description: b.notes || 'Tahsilat', balance_after: newBalance,
-        created_at: new Date(),
-      })
-      return ok(clean(payment))
+      const { data, error } = await supabase.from('payments').insert({
+        customer_id: b.customer_id,
+        amount, method: b.method || 'cash', notes: b.notes || null,
+        user_id: me.id, user_name: me.full_name,
+      }).select().single()
+      if (error) return fail(error.message)
+      return ok(data)
     }
 
-    // ===================== SETTINGS =====================
+    // ============== SETTINGS ==============
     if (route === '/settings' && method === 'GET') {
-      const s = await db.collection('settings').findOne({ id: 'company' })
-      return ok(clean(s))
+      const { data, error } = await supabase.from('settings').select('*').eq('id', 'company').maybeSingle()
+      if (error) return fail(error.message)
+      return ok(data || {})
     }
     if (route === '/settings' && method === 'PUT') {
       const b = await request.json()
-      await db.collection('settings').updateOne({ id: 'company' }, { $set: b })
+      const { id, ...payload } = b
+      payload.updated_at = new Date().toISOString()
+      const { error } = await supabase.from('settings').update(payload).eq('id', 'company')
+      if (error) return fail(error.message)
       return ok({ success: true })
     }
 

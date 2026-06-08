@@ -1,6 +1,8 @@
 -- ============================================================
--- Cactus Light & Sound ERP - Supabase Schema
--- Supabase / PostgreSQL Migration Script
+-- Cactus Light & Sound ERP - Supabase Schema (v2)
+-- Supabase / PostgreSQL Migration Script - Idempotent
+-- ============================================================
+-- Çalıştırma: Supabase Dashboard -> SQL Editor -> Paste -> Run
 -- ============================================================
 
 -- Extensions
@@ -11,7 +13,7 @@ create extension if not exists "pgcrypto";
 -- ============================================================
 create table if not exists public.users (
   id uuid primary key references auth.users on delete cascade,
-  username text unique not null,
+  username text unique,
   full_name text,
   email text,
   role text not null default 'staff' check (role in ('admin','staff')),
@@ -102,6 +104,7 @@ create table if not exists public.sales (
   id uuid primary key default gen_random_uuid(),
   invoice_number text unique not null,
   customer_id uuid not null references public.customers(id) on delete restrict,
+  customer_name text,
   subtotal numeric(14,2) not null default 0,
   tax_rate numeric(5,2) not null default 20,
   tax numeric(14,2) not null default 0,
@@ -110,6 +113,7 @@ create table if not exists public.sales (
   due numeric(14,2) not null default 0,
   notes text,
   user_id uuid references public.users(id),
+  user_name text,
   created_at timestamptz default now()
 );
 create index if not exists idx_sales_customer on public.sales(customer_id);
@@ -164,7 +168,7 @@ create table if not exists public.purchase_items (
 alter table public.purchase_items enable row level security;
 
 -- ============================================================
--- STOCK MOVEMENTS (audit trail for every stock change)
+-- STOCK MOVEMENTS (audit trail)
 -- ============================================================
 create table if not exists public.stock_movements (
   id uuid primary key default gen_random_uuid(),
@@ -220,7 +224,7 @@ create index if not exists idx_payments_customer on public.payments(customer_id)
 alter table public.payments enable row level security;
 
 -- ============================================================
--- SETTINGS (singleton row)
+-- SETTINGS (singleton)
 -- ============================================================
 create table if not exists public.settings (
   id text primary key default 'company',
@@ -239,10 +243,54 @@ create table if not exists public.settings (
 alter table public.settings enable row level security;
 
 -- ============================================================
+-- AUTH SYNC: auto-create public.users from auth.users
+-- (İLK kullanıcı otomatik admin olur!)
+-- ============================================================
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public as $$
+declare
+  is_first boolean;
+begin
+  select count(*) = 0 into is_first from public.users;
+  insert into public.users (id, username, full_name, email, role)
+  values (
+    new.id,
+    coalesce(new.raw_user_meta_data->>'username', split_part(new.email, '@', 1)),
+    coalesce(new.raw_user_meta_data->>'full_name', new.email),
+    new.email,
+    case when is_first then 'admin' else coalesce(new.raw_user_meta_data->>'role', 'staff') end
+  )
+  on conflict (id) do nothing;
+  return new;
+end; $$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+after insert on auth.users
+for each row execute function public.handle_new_user();
+
+-- ============================================================
+-- INVOICE NUMBER GENERATOR
+-- ============================================================
+create or replace function public.next_invoice_number()
+returns text language plpgsql security definer set search_path = public as $$
+declare
+  s record;
+  prefix text;
+  cnt int;
+begin
+  select * into s from public.settings where id = 'company' for update;
+  prefix := coalesce(s.invoice_prefix, 'CLS');
+  cnt := coalesce(s.invoice_counter, 1000) + 1;
+  update public.settings set invoice_counter = cnt where id = 'company';
+  return prefix || '-' || extract(year from now())::text || '-' || lpad(cnt::text, 5, '0');
+end; $$;
+
+-- ============================================================
 -- BUSINESS LOGIC TRIGGERS
 -- ============================================================
 
--- 1) After insert on sale_items -> decrease stock and log movement
+-- 1) sale_items INSERT -> stock - and log
 create or replace function public.handle_sale_item_insert()
 returns trigger language plpgsql as $$
 declare
@@ -250,11 +298,10 @@ declare
   inv text;
 begin
   select stock into cur_stock from public.products where id = new.product_id for update;
-  if cur_stock is null then raise exception 'Product not found'; end if;
-  if cur_stock < new.quantity then raise exception 'Insufficient stock for product %', new.product_id; end if;
+  if cur_stock is null then raise exception 'Ürün bulunamadı: %', new.product_id; end if;
+  if cur_stock < new.quantity then raise exception 'Yetersiz stok: %', new.product_name; end if;
 
   update public.products set stock = stock - new.quantity, updated_at = now() where id = new.product_id;
-
   select invoice_number into inv from public.sales where id = new.sale_id;
 
   insert into public.stock_movements (product_id, product_name, type, quantity, reason, reference_id, before_qty, after_qty)
@@ -268,7 +315,7 @@ create trigger trg_sale_item_insert
 after insert on public.sale_items
 for each row execute function public.handle_sale_item_insert();
 
--- 2) After insert on purchase_items -> increase stock and log movement
+-- 2) purchase_items INSERT -> stock +
 create or replace function public.handle_purchase_item_insert()
 returns trigger language plpgsql as $$
 declare cur_stock numeric(14,2);
@@ -285,12 +332,12 @@ create trigger trg_purchase_item_insert
 after insert on public.purchase_items
 for each row execute function public.handle_purchase_item_insert();
 
--- 3) After insert on sales -> increase customer balance by 'due'
+-- 3) sales INSERT -> customer balance + total (payment trigger will subtract paid)
 create or replace function public.handle_sale_insert()
 returns trigger language plpgsql as $$
 declare new_bal numeric(14,2);
 begin
-  update public.customers set balance = balance + new.due, updated_at = now()
+  update public.customers set balance = balance + new.total, updated_at = now()
   where id = new.customer_id returning balance into new_bal;
   insert into public.customer_transactions (customer_id, type, amount, reference_id, reference_number, description, balance_after)
   values (new.customer_id, 'sale', new.total, new.id, new.invoice_number, 'Satış Faturası ' || new.invoice_number, new_bal);
@@ -302,7 +349,7 @@ create trigger trg_sale_insert
 after insert on public.sales
 for each row execute function public.handle_sale_insert();
 
--- 4) After insert on payments -> decrease customer balance
+-- 4) payments INSERT -> customer balance -
 create or replace function public.handle_payment_insert()
 returns trigger language plpgsql as $$
 declare new_bal numeric(14,2);
@@ -320,50 +367,77 @@ after insert on public.payments
 for each row execute function public.handle_payment_insert();
 
 -- ============================================================
--- ROW LEVEL SECURITY POLICIES
+-- RLS POLICIES (idempotent)
 -- ============================================================
--- All authenticated users can read everything.
--- Only admin users can write to settings and users tables.
--- Staff can create/modify operational data.
-
-create or replace function public.is_admin() returns boolean language sql stable as $$
+-- is_admin: SECURITY DEFINER ile recursion'dan kaçınır
+create or replace function public.is_admin()
+returns boolean language sql stable security definer set search_path = public as $$
   select coalesce((select role = 'admin' from public.users where id = auth.uid()), false);
 $$;
 
--- Helper: shorthand policy creation
-do $$ begin
-  -- USERS: each user reads themselves, admin reads all; admin writes
-  create policy users_read on public.users for select to authenticated using (id = auth.uid() or public.is_admin());
-  create policy users_write on public.users for all to authenticated using (public.is_admin()) with check (public.is_admin());
+-- Drop existing policies (clean slate)
+drop policy if exists users_read on public.users;
+drop policy if exists users_write on public.users;
+drop policy if exists users_self_update on public.users;
+drop policy if exists categories_all on public.categories;
+drop policy if exists products_all on public.products;
+drop policy if exists customers_all on public.customers;
+drop policy if exists suppliers_all on public.suppliers;
+drop policy if exists sales_all on public.sales;
+drop policy if exists sale_items_all on public.sale_items;
+drop policy if exists purchases_all on public.purchases;
+drop policy if exists purchase_items_all on public.purchase_items;
+drop policy if exists stock_movements_all on public.stock_movements;
+drop policy if exists customer_transactions_all on public.customer_transactions;
+drop policy if exists payments_all on public.payments;
+drop policy if exists settings_read on public.settings;
+drop policy if exists settings_write on public.settings;
 
-  -- CATEGORIES / PRODUCTS / CUSTOMERS / SUPPLIERS: all authenticated can read & write
-  create policy categories_all on public.categories for all to authenticated using (true) with check (true);
-  create policy products_all on public.products for all to authenticated using (true) with check (true);
-  create policy customers_all on public.customers for all to authenticated using (true) with check (true);
-  create policy suppliers_all on public.suppliers for all to authenticated using (true) with check (true);
+-- USERS: self read; admin read all & write all
+create policy users_read on public.users for select to authenticated
+  using (id = auth.uid() or public.is_admin());
+create policy users_write on public.users for all to authenticated
+  using (public.is_admin()) with check (public.is_admin());
 
-  -- SALES / PURCHASES + items
-  create policy sales_all on public.sales for all to authenticated using (true) with check (true);
-  create policy sale_items_all on public.sale_items for all to authenticated using (true) with check (true);
-  create policy purchases_all on public.purchases for all to authenticated using (true) with check (true);
-  create policy purchase_items_all on public.purchase_items for all to authenticated using (true) with check (true);
+-- Operational tables: all authenticated can read/write
+create policy categories_all on public.categories for all to authenticated using (true) with check (true);
+create policy products_all on public.products for all to authenticated using (true) with check (true);
+create policy customers_all on public.customers for all to authenticated using (true) with check (true);
+create policy suppliers_all on public.suppliers for all to authenticated using (true) with check (true);
+create policy sales_all on public.sales for all to authenticated using (true) with check (true);
+create policy sale_items_all on public.sale_items for all to authenticated using (true) with check (true);
+create policy purchases_all on public.purchases for all to authenticated using (true) with check (true);
+create policy purchase_items_all on public.purchase_items for all to authenticated using (true) with check (true);
+create policy stock_movements_all on public.stock_movements for all to authenticated using (true) with check (true);
+create policy customer_transactions_all on public.customer_transactions for all to authenticated using (true) with check (true);
+create policy payments_all on public.payments for all to authenticated using (true) with check (true);
 
-  -- LEDGERS & MOVEMENTS
-  create policy stock_movements_all on public.stock_movements for all to authenticated using (true) with check (true);
-  create policy customer_transactions_all on public.customer_transactions for all to authenticated using (true) with check (true);
-  create policy payments_all on public.payments for all to authenticated using (true) with check (true);
-
-  -- SETTINGS: read for all, write for admin
-  create policy settings_read on public.settings for select to authenticated using (true);
-  create policy settings_write on public.settings for all to authenticated using (public.is_admin()) with check (public.is_admin());
-exception when duplicate_object then null;
-end $$;
+-- SETTINGS: read all, write admin
+create policy settings_read on public.settings for select to authenticated using (true);
+create policy settings_write on public.settings for all to authenticated
+  using (public.is_admin()) with check (public.is_admin());
 
 -- ============================================================
--- STORAGE BUCKETS (run in Supabase Dashboard or via API)
+-- STORAGE BUCKETS
 -- ============================================================
--- create public bucket "product-images"
--- create public bucket "company-logos"
+insert into storage.buckets (id, name, public)
+values ('product-images', 'product-images', true), ('company-logos', 'company-logos', true)
+on conflict (id) do nothing;
+
+-- Storage policies
+drop policy if exists "storage_public_read" on storage.objects;
+drop policy if exists "storage_auth_insert" on storage.objects;
+drop policy if exists "storage_auth_update" on storage.objects;
+drop policy if exists "storage_auth_delete" on storage.objects;
+
+create policy "storage_public_read" on storage.objects for select to public
+  using (bucket_id in ('product-images', 'company-logos'));
+create policy "storage_auth_insert" on storage.objects for insert to authenticated
+  with check (bucket_id in ('product-images', 'company-logos'));
+create policy "storage_auth_update" on storage.objects for update to authenticated
+  using (bucket_id in ('product-images', 'company-logos'));
+create policy "storage_auth_delete" on storage.objects for delete to authenticated
+  using (bucket_id in ('product-images', 'company-logos'));
 
 -- ============================================================
 -- DEFAULT DATA
@@ -375,3 +449,11 @@ on conflict (id) do nothing;
 insert into public.categories (name) values
   ('Aydınlatma'),('Ses Sistemi'),('Mikser'),('Mikrofon'),('Hoparlör'),('Anfi'),('Kablo & Aksesuar')
 on conflict do nothing;
+
+-- ============================================================
+-- POST-INSTALL NOTES
+-- ============================================================
+-- 1) Authentication -> Users -> Add User
+--    Email: admin@cactus.com  Password: <güçlü>  Auto Confirm: ✅
+-- 2) SQL Editor: UPDATE public.users SET role='admin' WHERE email='admin@cactus.com';
+-- 3) (Opsiyonel) İlk kullanıcı oluşunca trigger otomatik public.users'a satır ekler.

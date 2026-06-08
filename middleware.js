@@ -1,19 +1,50 @@
 import { NextResponse } from 'next/server'
+import { createServerClient } from '@supabase/ssr'
 
-const PUBLIC_PATHS = ['/login', '/api', '/_next', '/favicon.ico']
+const PUBLIC_PATHS = ['/login', '/api/auth', '/_next', '/favicon.ico']
 
-export function middleware(request) {
+export async function middleware(request) {
+  let response = NextResponse.next({ request })
+
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL,
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY,
+    {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll()
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value }) =>
+            request.cookies.set(name, value)
+          )
+          response = NextResponse.next({ request })
+          cookiesToSet.forEach(({ name, value, options }) =>
+            response.cookies.set(name, value, options)
+          )
+        },
+      },
+    }
+  )
+
+  const { data: { user } } = await supabase.auth.getUser()
   const { pathname } = request.nextUrl
-  if (PUBLIC_PATHS.some(p => pathname === p || pathname.startsWith(p + '/'))) {
-    return NextResponse.next()
-  }
-  const session = request.cookies.get('cls_session')?.value
-  if (!session && pathname !== '/') {
+
+  const isPublic = PUBLIC_PATHS.some(p => pathname === p || pathname.startsWith(p + '/'))
+
+  if (!user && !isPublic && pathname !== '/') {
     const url = request.nextUrl.clone()
     url.pathname = '/login'
     return NextResponse.redirect(url)
   }
-  return NextResponse.next()
+
+  if (user && pathname === '/login') {
+    const url = request.nextUrl.clone()
+    url.pathname = '/dashboard'
+    return NextResponse.redirect(url)
+  }
+
+  return response
 }
 
 export const config = {
