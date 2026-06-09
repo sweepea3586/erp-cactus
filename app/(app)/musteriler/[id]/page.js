@@ -378,7 +378,12 @@ function TransactionBadge({ type }) {
     refund: { label: 'İade', className: 'bg-amber-100 text-amber-700 hover:bg-amber-100' },
     adjustment: { label: 'Düzeltme', className: 'bg-slate-100 text-slate-600 hover:bg-slate-100' },
   }
-  const cfg = map[type] ?? { label: type, className: 'bg-slate-100 text-slate-600 hover:bg-slate-100' }
+
+  const cfg = map[type] ?? {
+    label: type,
+    className: 'bg-slate-100 text-slate-600 hover:bg-slate-100',
+  }
+
   return <Badge className={`text-xs ${cfg.className}`}>{cfg.label}</Badge>
 }
 Commit changes
