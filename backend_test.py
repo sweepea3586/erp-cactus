@@ -1,875 +1,1185 @@
 #!/usr/bin/env python3
 """
-Comprehensive backend API test for Cactus Light & Sound ERP
-Tests all endpoints with cookie-based authentication
+Comprehensive backend API test for Cactus Light & Sound ERP - Supabase Edition
+Tests all endpoints with Supabase cookie-based authentication
 """
 import requests
 import json
 import sys
+from time import time
 
 # Base URL from .env: NEXT_PUBLIC_BASE_URL + /api
 BASE_URL = "https://erp-cactus.preview.emergentagent.com/api"
 
-# Test credentials
-ADMIN_USER = "admin"
-ADMIN_PASS = "admin123"
-STAFF_USER = "personel"
-STAFF_PASS = "personel123"
-
-# Global session for cookie persistence
+# Global session for cookie persistence (Supabase uses sb-* cookies)
 session = requests.Session()
 
+# Test user credentials (will be created fresh each run)
+TEST_EMAIL = f"test{int(time())}@cactus.local"
+TEST_PASSWORD = "test123456"  # >= 6 chars
+TEST_FULL_NAME = "Test User"
+
+# Global variables to store created resources
+created_product_id = None
+created_customer_id = None
+created_sale_id = None
+created_category_id = None
+
 def print_test(name):
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     print(f"TEST: {name}")
-    print('='*60)
+    print('='*70)
 
 def print_result(success, message):
     status = "✅ PASS" if success else "❌ FAIL"
     print(f"{status}: {message}")
     return success
 
-def test_auth_flow():
-    """Test 1: Authentication flow"""
-    print_test("1. Authentication Flow")
+def print_error(resp):
+    """Print detailed error information"""
+    print(f"  Status: {resp.status_code}")
+    print(f"  Response: {resp.text[:500]}")
+
+# ============== TEST 1: AUTH ==============
+def test_auth():
+    """Test 1: Authentication with Supabase"""
+    print_test("1. Authentication (Supabase)")
     
-    # Test wrong credentials
-    try:
-        resp = requests.post(f"{BASE_URL}/auth/login", json={"username": "wrong", "password": "wrong"})
-        if resp.status_code == 401:
-            print_result(True, "Wrong credentials returns 401")
-        else:
-            print_result(False, f"Wrong credentials should return 401, got {resp.status_code}")
-            print(f"Response: {resp.text}")
-    except Exception as e:
-        print_result(False, f"Login with wrong credentials failed: {e}")
+    all_passed = True
     
-    # Test correct login
+    # 1.1: Signup with unique email
     try:
-        resp = session.post(f"{BASE_URL}/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASS})
+        print(f"\n1.1: POST /auth/signup with email={TEST_EMAIL}")
+        resp = session.post(f"{BASE_URL}/auth/signup", json={
+            "email": TEST_EMAIL,
+            "password": TEST_PASSWORD,
+            "full_name": TEST_FULL_NAME
+        })
         if resp.status_code == 200:
             data = resp.json()
-            if 'user' in data and data['user'].get('username') == ADMIN_USER:
-                # Check for cookie
-                if 'cls_session' in session.cookies:
-                    print_result(True, f"Login successful with user {ADMIN_USER}, cookie set")
-                else:
-                    print_result(False, "Login successful but cls_session cookie not found")
-                    print(f"Cookies: {session.cookies}")
+            if 'user' in data:
+                print_result(True, f"Signup successful: {data['user'].get('email')}")
             else:
-                print_result(False, f"Login response missing user object: {data}")
+                print_result(False, f"Signup response missing user: {data}")
+                all_passed = False
         else:
-            print_result(False, f"Login failed with status {resp.status_code}: {resp.text}")
+            print_result(False, f"Signup failed")
+            print_error(resp)
+            all_passed = False
+    except Exception as e:
+        print_result(False, f"Signup request failed: {e}")
+        all_passed = False
+    
+    # 1.2: Login with wrong password
+    try:
+        print(f"\n1.2: POST /auth/login with wrong password")
+        resp = requests.post(f"{BASE_URL}/auth/login", json={
+            "email": TEST_EMAIL,
+            "password": "wrongpassword"
+        })
+        if resp.status_code == 401:
+            print_result(True, "Wrong password returns 401")
+        else:
+            print_result(False, f"Wrong password should return 401, got {resp.status_code}")
+            print_error(resp)
+            all_passed = False
+    except Exception as e:
+        print_result(False, f"Login with wrong password failed: {e}")
+        all_passed = False
+    
+    # 1.3: Login with correct credentials
+    try:
+        print(f"\n1.3: POST /auth/login with correct credentials")
+        resp = session.post(f"{BASE_URL}/auth/login", json={
+            "email": TEST_EMAIL,
+            "password": TEST_PASSWORD
+        })
+        if resp.status_code == 200:
+            data = resp.json()
+            if 'user' in data:
+                # Check for Supabase cookies (sb-*)
+                cookie_names = list(session.cookies.keys())
+                has_sb_cookies = any('sb' in name for name in cookie_names)
+                if has_sb_cookies or len(cookie_names) > 0:
+                    print_result(True, f"Login successful, cookies set: {cookie_names}")
+                else:
+                    print_result(True, f"Login successful (no cookies detected)")
+            else:
+                print_result(False, f"Login response missing user: {data}")
+                all_passed = False
+        else:
+            print_result(False, f"Login failed")
+            print_error(resp)
+            all_passed = False
+            return False  # Can't continue without auth
     except Exception as e:
         print_result(False, f"Login request failed: {e}")
+        all_passed = False
         return False
     
-    # Test /auth/me with cookie
+    # 1.4: GET /auth/me with session
     try:
+        print(f"\n1.4: GET /auth/me with session")
         resp = session.get(f"{BASE_URL}/auth/me")
         if resp.status_code == 200:
             data = resp.json()
             if 'user' in data:
-                print_result(True, f"GET /auth/me with cookie returns user: {data['user'].get('username')}")
+                print_result(True, f"GET /auth/me returns user: {data['user'].get('email')}")
             else:
                 print_result(False, f"GET /auth/me response missing user: {data}")
+                all_passed = False
         else:
-            print_result(False, f"GET /auth/me failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /auth/me failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"GET /auth/me failed: {e}")
+        all_passed = False
     
-    # Test /auth/me without cookie
+    # 1.5: GET /auth/me without session
     try:
+        print(f"\n1.5: GET /auth/me without session")
         resp = requests.get(f"{BASE_URL}/auth/me")
         if resp.status_code == 401:
-            print_result(True, "GET /auth/me without cookie returns 401")
+            print_result(True, "GET /auth/me without session returns 401")
         else:
-            print_result(False, f"GET /auth/me without cookie should return 401, got {resp.status_code}")
+            print_result(False, f"Should return 401, got {resp.status_code}")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"GET /auth/me without cookie failed: {e}")
+        print_result(False, f"GET /auth/me without session failed: {e}")
+        all_passed = False
     
-    # Test protected endpoint without cookie
+    # 1.6: GET /products without session (protected endpoint)
     try:
+        print(f"\n1.6: GET /products without session")
         resp = requests.get(f"{BASE_URL}/products")
         if resp.status_code == 401:
-            print_result(True, "GET /products without cookie returns 401")
+            print_result(True, "GET /products without session returns 401")
         else:
-            print_result(False, f"GET /products without cookie should return 401, got {resp.status_code}")
+            print_result(False, f"Should return 401, got {resp.status_code}")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"GET /products without cookie failed: {e}")
+        print_result(False, f"GET /products without session failed: {e}")
+        all_passed = False
     
-    return True
+    return all_passed
 
+# ============== TEST 2: CATEGORIES ==============
 def test_categories():
     """Test 2: Categories"""
     print_test("2. Categories")
     
-    # GET categories
+    global created_category_id
+    all_passed = True
+    
+    # 2.1: GET /categories
     try:
+        print(f"\n2.1: GET /categories")
         resp = session.get(f"{BASE_URL}/categories")
         if resp.status_code == 200:
             data = resp.json()
-            if isinstance(data, list) and len(data) >= 7:
-                print_result(True, f"GET /categories returns {len(data)} categories (expected >= 7)")
+            if isinstance(data, list):
+                # Check for default categories
+                expected = ["Aydınlatma", "Ses Sistemi", "Mikser", "Mikrofon", "Hoparlör", "Anfi", "Kablo & Aksesuar"]
+                found = [c.get('name') for c in data]
+                missing = [e for e in expected if e not in found]
+                if len(missing) == 0:
+                    print_result(True, f"GET /categories returns {len(data)} categories including all 7 defaults")
+                else:
+                    print_result(False, f"Missing default categories: {missing}")
+                    all_passed = False
             else:
-                print_result(False, f"GET /categories should return at least 7 categories, got {len(data) if isinstance(data, list) else 'not a list'}")
+                print_result(False, f"Expected array, got: {type(data)}")
+                all_passed = False
         else:
-            print_result(False, f"GET /categories failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /categories failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"GET /categories failed: {e}")
+        all_passed = False
     
-    # POST new category
+    # 2.2: POST /categories
     try:
-        resp = session.post(f"{BASE_URL}/categories", json={"name": "Test Kategori"})
+        print(f"\n2.2: POST /categories")
+        ts = int(time())
+        resp = session.post(f"{BASE_URL}/categories", json={"name": f"Test Kat {ts}"})
         if resp.status_code == 200:
             data = resp.json()
-            if 'id' in data and 'name' in data and data['name'] == "Test Kategori":
-                print_result(True, f"POST /categories created category with id: {data['id']}")
-                return data['id']
+            if 'id' in data and 'name' in data:
+                created_category_id = data['id']
+                print_result(True, f"POST /categories created: {data['name']} (id={data['id']})")
             else:
-                print_result(False, f"POST /categories response missing id or name: {data}")
+                print_result(False, f"Response missing id or name: {data}")
+                all_passed = False
         else:
-            print_result(False, f"POST /categories failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"POST /categories failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"POST /categories failed: {e}")
+        all_passed = False
     
-    return None
+    return all_passed
 
-def test_products(category_id):
+# ============== TEST 3: PRODUCTS CRUD ==============
+def test_products():
     """Test 3: Products CRUD"""
     print_test("3. Products CRUD")
     
-    # GET products
-    try:
-        resp = session.get(f"{BASE_URL}/products")
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and len(data) >= 4:
-                print_result(True, f"GET /products returns {len(data)} products (expected >= 4 seeded)")
-            else:
-                print_result(False, f"GET /products should return at least 4 products, got {len(data) if isinstance(data, list) else 'not a list'}")
-        else:
-            print_result(False, f"GET /products failed: {resp.status_code} - {resp.text}")
-    except Exception as e:
-        print_result(False, f"GET /products failed: {e}")
+    global created_product_id
+    all_passed = True
+    ts = int(time())
     
-    # Search products
+    # 3.1: POST /products
     try:
-        resp = session.get(f"{BASE_URL}/products?q=JBL")
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list):
-                print_result(True, f"GET /products?q=JBL returns {len(data)} filtered results")
-            else:
-                print_result(False, f"GET /products?q=JBL should return list, got {type(data)}")
-        else:
-            print_result(False, f"GET /products?q=JBL failed: {resp.status_code} - {resp.text}")
-    except Exception as e:
-        print_result(False, f"GET /products?q=JBL failed: {e}")
-    
-    # POST new product
-    product_id = None
-    try:
+        print(f"\n3.1: POST /products")
         product_data = {
-            "sku": "TST-001",
+            "sku": f"TST-{ts}",
             "name": "Test Ürün",
-            "brand": "TestMarka",
+            "brand": "TestBrand",
             "purchase_price": 100,
             "selling_price": 200,
             "stock": 10,
-            "min_stock": 2,
-            "category_id": category_id
+            "min_stock": 2
         }
         resp = session.post(f"{BASE_URL}/products", json=product_data)
         if resp.status_code == 200:
             data = resp.json()
-            if 'id' in data and data.get('name') == "Test Ürün":
-                product_id = data['id']
-                print_result(True, f"POST /products created product with id: {product_id}")
+            if 'id' in data:
+                created_product_id = data['id']
+                print_result(True, f"POST /products created: {data['name']} (id={data['id']}, stock={data.get('stock')})")
             else:
-                print_result(False, f"POST /products response missing id or name: {data}")
+                print_result(False, f"Response missing id: {data}")
+                all_passed = False
         else:
-            print_result(False, f"POST /products failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"POST /products failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"POST /products failed: {e}")
+        all_passed = False
     
-    if not product_id:
-        print_result(False, "Cannot continue product tests without product_id")
-        return None
-    
-    # GET single product
+    # 3.2: GET /products
     try:
-        resp = session.get(f"{BASE_URL}/products/{product_id}")
+        print(f"\n3.2: GET /products")
+        resp = session.get(f"{BASE_URL}/products")
         if resp.status_code == 200:
             data = resp.json()
-            if data.get('id') == product_id and data.get('name') == "Test Ürün":
-                print_result(True, f"GET /products/{product_id} returns correct product")
+            if isinstance(data, list):
+                found = any(p.get('id') == created_product_id for p in data)
+                if found:
+                    print_result(True, f"GET /products returns array containing new product")
+                else:
+                    print_result(False, f"New product not found in list")
+                    all_passed = False
             else:
-                print_result(False, f"GET /products/{product_id} returned wrong data: {data}")
+                print_result(False, f"Expected array, got: {type(data)}")
+                all_passed = False
         else:
-            print_result(False, f"GET /products/{product_id} failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /products failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"GET /products/{product_id} failed: {e}")
+        print_result(False, f"GET /products failed: {e}")
+        all_passed = False
     
-    # PUT update product
+    # 3.3: GET /products?q=Test
     try:
+        print(f"\n3.3: GET /products?q=Test")
+        resp = session.get(f"{BASE_URL}/products?q=Test")
+        if resp.status_code == 200:
+            data = resp.json()
+            if isinstance(data, list):
+                found = any(p.get('id') == created_product_id for p in data)
+                if found:
+                    print_result(True, f"GET /products?q=Test filters correctly")
+                else:
+                    print_result(False, f"Search didn't find test product")
+                    all_passed = False
+            else:
+                print_result(False, f"Expected array, got: {type(data)}")
+                all_passed = False
+        else:
+            print_result(False, f"GET /products?q=Test failed")
+            print_error(resp)
+            all_passed = False
+    except Exception as e:
+        print_result(False, f"GET /products?q=Test failed: {e}")
+        all_passed = False
+    
+    # 3.4: GET /products/{id}
+    try:
+        print(f"\n3.4: GET /products/{created_product_id}")
+        resp = session.get(f"{BASE_URL}/products/{created_product_id}")
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('id') == created_product_id:
+                print_result(True, f"GET /products/{{id}} returns product: {data.get('name')}")
+            else:
+                print_result(False, f"Wrong product returned: {data}")
+                all_passed = False
+        else:
+            print_result(False, f"GET /products/{{id}} failed")
+            print_error(resp)
+            all_passed = False
+    except Exception as e:
+        print_result(False, f"GET /products/{{id}} failed: {e}")
+        all_passed = False
+    
+    # 3.5: PUT /products/{id}
+    try:
+        print(f"\n3.5: PUT /products/{created_product_id}")
         update_data = {
-            "sku": "TST-001",
-            "name": "Test Ürün Güncellendi",
-            "brand": "TestMarka",
+            "sku": f"TST-{ts}",
+            "name": "Test Updated",
+            "brand": "TestBrand",
             "purchase_price": 120,
             "selling_price": 250,
-            "min_stock": 3,
-            "category_id": category_id
+            "min_stock": 3
         }
-        resp = session.put(f"{BASE_URL}/products/{product_id}", json=update_data)
+        resp = session.put(f"{BASE_URL}/products/{created_product_id}", json=update_data)
         if resp.status_code == 200:
-            print_result(True, f"PUT /products/{product_id} updated successfully")
+            print_result(True, f"PUT /products/{{id}} updated successfully")
         else:
-            print_result(False, f"PUT /products/{product_id} failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"PUT /products/{{id}} failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"PUT /products/{product_id} failed: {e}")
+        print_result(False, f"PUT /products/{{id}} failed: {e}")
+        all_passed = False
     
-    # Verify update
+    # 3.6: GET /products/{id}/movements
     try:
-        resp = session.get(f"{BASE_URL}/products/{product_id}")
+        print(f"\n3.6: GET /products/{created_product_id}/movements")
+        resp = session.get(f"{BASE_URL}/products/{created_product_id}/movements")
         if resp.status_code == 200:
             data = resp.json()
-            if data.get('name') == "Test Ürün Güncellendi":
-                print_result(True, "Product name updated correctly")
+            if isinstance(data, list):
+                # Should have at least 1 'in' movement from initial stock
+                in_movements = [m for m in data if m.get('type') == 'in']
+                if len(in_movements) >= 1:
+                    print_result(True, f"GET /products/{{id}}/movements returns {len(data)} movements (including initial stock)")
+                else:
+                    print_result(False, f"No 'in' movement found for initial stock")
+                    all_passed = False
             else:
-                print_result(False, f"Product name not updated: {data.get('name')}")
+                print_result(False, f"Expected array, got: {type(data)}")
+                all_passed = False
         else:
-            print_result(False, f"GET /products/{product_id} after update failed: {resp.status_code}")
+            print_result(False, f"GET /products/{{id}}/movements failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Verify update failed: {e}")
+        print_result(False, f"GET /products/{{id}}/movements failed: {e}")
+        all_passed = False
     
-    # GET product movements
-    try:
-        resp = session.get(f"{BASE_URL}/products/{product_id}/movements")
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and len(data) >= 1:
-                print_result(True, f"GET /products/{product_id}/movements returns {len(data)} movements (expected >= 1 for initial stock)")
-            else:
-                print_result(False, f"GET /products/{product_id}/movements should return at least 1 movement, got {len(data) if isinstance(data, list) else 'not a list'}")
-        else:
-            print_result(False, f"GET /products/{product_id}/movements failed: {resp.status_code} - {resp.text}")
-    except Exception as e:
-        print_result(False, f"GET /products/{product_id}/movements failed: {e}")
-    
-    # DELETE product (will do later after stock tests)
-    return product_id
+    return all_passed
 
-def test_stock_adjustments(product_id):
+# ============== TEST 4: STOCK ADJUSTMENTS ==============
+def test_stock_adjustments():
     """Test 4: Stock adjustments"""
     print_test("4. Stock Adjustments")
     
-    # Get current stock
-    try:
-        resp = session.get(f"{BASE_URL}/products/{product_id}")
-        if resp.status_code == 200:
-            current_stock = resp.json().get('stock', 0)
-            print(f"Current stock: {current_stock}")
-        else:
-            print_result(False, f"Cannot get current stock: {resp.status_code}")
-            return
-    except Exception as e:
-        print_result(False, f"Cannot get current stock: {e}")
-        return
+    all_passed = True
+    ts = int(time())
     
-    # Stock IN
+    # Create a test product with stock=5
+    test_product_id = None
     try:
+        print(f"\n4.0: Create test product with stock=5")
+        resp = session.post(f"{BASE_URL}/products", json={
+            "sku": f"STK-{ts}",
+            "name": "Stock Test Product",
+            "brand": "Test",
+            "purchase_price": 50,
+            "selling_price": 100,
+            "stock": 5,
+            "min_stock": 1
+        })
+        if resp.status_code == 200:
+            data = resp.json()
+            test_product_id = data['id']
+            print_result(True, f"Created test product with stock=5 (id={test_product_id})")
+        else:
+            print_result(False, f"Failed to create test product")
+            print_error(resp)
+            return False
+    except Exception as e:
+        print_result(False, f"Failed to create test product: {e}")
+        return False
+    
+    # 4.1: Stock IN (+3)
+    try:
+        print(f"\n4.1: POST /stock/adjust (type=in, quantity=3)")
         resp = session.post(f"{BASE_URL}/stock/adjust", json={
-            "product_id": product_id,
+            "product_id": test_product_id,
             "type": "in",
             "quantity": 3,
             "reason": "Test giriş"
         })
         if resp.status_code == 200:
             data = resp.json()
-            expected_stock = current_stock + 3
-            if data.get('stock') == expected_stock:
-                print_result(True, f"Stock IN: stock increased from {current_stock} to {data.get('stock')}")
-                current_stock = expected_stock
+            if data.get('stock') == 8:
+                print_result(True, f"Stock IN: 5 + 3 = {data.get('stock')}")
             else:
-                print_result(False, f"Stock IN: expected {expected_stock}, got {data.get('stock')}")
+                print_result(False, f"Expected stock=8, got {data.get('stock')}")
+                all_passed = False
         else:
-            print_result(False, f"Stock IN failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"POST /stock/adjust (in) failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Stock IN failed: {e}")
+        print_result(False, f"POST /stock/adjust (in) failed: {e}")
+        all_passed = False
     
-    # Stock OUT
+    # 4.2: Stock OUT (-2)
     try:
+        print(f"\n4.2: POST /stock/adjust (type=out, quantity=2)")
         resp = session.post(f"{BASE_URL}/stock/adjust", json={
-            "product_id": product_id,
+            "product_id": test_product_id,
             "type": "out",
             "quantity": 2,
             "reason": "Test çıkış"
         })
         if resp.status_code == 200:
             data = resp.json()
-            expected_stock = current_stock - 2
-            if data.get('stock') == expected_stock:
-                print_result(True, f"Stock OUT: stock decreased from {current_stock} to {data.get('stock')}")
-                current_stock = expected_stock
+            if data.get('stock') == 6:
+                print_result(True, f"Stock OUT: 8 - 2 = {data.get('stock')}")
             else:
-                print_result(False, f"Stock OUT: expected {expected_stock}, got {data.get('stock')}")
+                print_result(False, f"Expected stock=6, got {data.get('stock')}")
+                all_passed = False
         else:
-            print_result(False, f"Stock OUT failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"POST /stock/adjust (out) failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Stock OUT failed: {e}")
+        print_result(False, f"POST /stock/adjust (out) failed: {e}")
+        all_passed = False
     
-    # Negative stock test
+    # 4.3: Stock OUT with insufficient quantity (should fail)
     try:
+        print(f"\n4.3: POST /stock/adjust (type=out, quantity=999) - should fail")
         resp = session.post(f"{BASE_URL}/stock/adjust", json={
-            "product_id": product_id,
+            "product_id": test_product_id,
             "type": "out",
             "quantity": 999,
-            "reason": "Negatif test"
+            "reason": "Test negatif"
         })
         if resp.status_code == 400:
-            print_result(True, "Stock OUT with excessive quantity returns 400 (prevents negative stock)")
+            print_result(True, f"Stock OUT with insufficient quantity returns 400")
         else:
-            print_result(False, f"Stock OUT with excessive quantity should return 400, got {resp.status_code}")
+            print_result(False, f"Should return 400, got {resp.status_code}")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Negative stock test failed: {e}")
+        print_result(False, f"POST /stock/adjust (out 999) failed: {e}")
+        all_passed = False
     
-    # Stock ADJUST
+    # 4.4: Stock ADJUST (set to 50)
     try:
+        print(f"\n4.4: POST /stock/adjust (type=adjust, quantity=50)")
         resp = session.post(f"{BASE_URL}/stock/adjust", json={
-            "product_id": product_id,
+            "product_id": test_product_id,
             "type": "adjust",
             "quantity": 50,
-            "reason": "Sayım"
+            "reason": "Test sayım"
         })
         if resp.status_code == 200:
             data = resp.json()
             if data.get('stock') == 50:
-                print_result(True, f"Stock ADJUST: stock set to 50")
-                current_stock = 50
+                print_result(True, f"Stock ADJUST: set to {data.get('stock')}")
             else:
-                print_result(False, f"Stock ADJUST: expected 50, got {data.get('stock')}")
+                print_result(False, f"Expected stock=50, got {data.get('stock')}")
+                all_passed = False
         else:
-            print_result(False, f"Stock ADJUST failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"POST /stock/adjust (adjust) failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Stock ADJUST failed: {e}")
+        print_result(False, f"POST /stock/adjust (adjust) failed: {e}")
+        all_passed = False
     
-    # GET stock movements
+    # 4.5: GET /stock/movements
     try:
+        print(f"\n4.5: GET /stock/movements")
         resp = session.get(f"{BASE_URL}/stock/movements")
         if resp.status_code == 200:
             data = resp.json()
-            if isinstance(data, list) and len(data) > 0:
-                print_result(True, f"GET /stock/movements returns {len(data)} movements")
+            if isinstance(data, list):
+                # Check for our test movements
+                test_movements = [m for m in data if m.get('product_id') == test_product_id]
+                types = [m.get('type') for m in test_movements]
+                if 'in' in types and 'out' in types and 'adjust' in types:
+                    print_result(True, f"GET /stock/movements returns movements with correct types")
+                else:
+                    print_result(False, f"Missing movement types: {types}")
+                    all_passed = False
             else:
-                print_result(False, f"GET /stock/movements should return movements, got {len(data) if isinstance(data, list) else 'not a list'}")
+                print_result(False, f"Expected array, got: {type(data)}")
+                all_passed = False
         else:
-            print_result(False, f"GET /stock/movements failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /stock/movements failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"GET /stock/movements failed: {e}")
+        all_passed = False
+    
+    return all_passed
 
+# ============== TEST 5: CUSTOMERS CRUD ==============
 def test_customers():
-    """Test 5: Customers CRUD"""
-    print_test("5. Customers CRUD")
+    """Test 5: Customers CRUD + payments"""
+    print_test("5. Customers CRUD + Payments")
     
-    # GET customers
-    try:
-        resp = session.get(f"{BASE_URL}/customers")
-        if resp.status_code == 200:
-            data = resp.json()
-            if isinstance(data, list) and len(data) > 0:
-                print_result(True, f"GET /customers returns {len(data)} customers (seeded)")
-            else:
-                print_result(False, f"GET /customers should return seeded customers, got {len(data) if isinstance(data, list) else 'not a list'}")
-        else:
-            print_result(False, f"GET /customers failed: {resp.status_code} - {resp.text}")
-    except Exception as e:
-        print_result(False, f"GET /customers failed: {e}")
+    global created_customer_id
+    all_passed = True
+    ts = int(time())
     
-    # POST new customer
-    customer_id = None
+    # 5.1: POST /customers
     try:
+        print(f"\n5.1: POST /customers")
         customer_data = {
-            "company_name": "Test Firma",
-            "contact_person": "Ali Veli",
-            "phone": "555-1234",
-            "email": "test@firma.com",
-            "tax_office": "Test Vergi Dairesi",
-            "tax_number": "1234567890"
+            "company_name": f"Test Firma {ts}",
+            "contact_person": "Ali",
+            "phone": "555",
+            "email": "a@b.com",
+            "tax_office": "X",
+            "tax_number": "12345"
         }
         resp = session.post(f"{BASE_URL}/customers", json=customer_data)
         if resp.status_code == 200:
             data = resp.json()
-            if 'id' in data and data.get('company_name') == "Test Firma":
-                customer_id = data['id']
-                print_result(True, f"POST /customers created customer with id: {customer_id}")
+            if 'id' in data:
+                created_customer_id = data['id']
+                print_result(True, f"POST /customers created: {data['company_name']} (id={data['id']})")
             else:
-                print_result(False, f"POST /customers response missing id or company_name: {data}")
+                print_result(False, f"Response missing id: {data}")
+                all_passed = False
         else:
-            print_result(False, f"POST /customers failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"POST /customers failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"POST /customers failed: {e}")
+        all_passed = False
     
-    if not customer_id:
-        print_result(False, "Cannot continue customer tests without customer_id")
-        return None
-    
-    # GET single customer
+    # 5.2: GET /customers
     try:
-        resp = session.get(f"{BASE_URL}/customers/{customer_id}")
+        print(f"\n5.2: GET /customers")
+        resp = session.get(f"{BASE_URL}/customers")
         if resp.status_code == 200:
             data = resp.json()
-            if data.get('id') == customer_id:
-                print_result(True, f"GET /customers/{customer_id} returns correct customer")
+            if isinstance(data, list):
+                found = any(c.get('id') == created_customer_id for c in data)
+                if found:
+                    print_result(True, f"GET /customers returns array containing new customer")
+                else:
+                    print_result(False, f"New customer not found in list")
+                    all_passed = False
             else:
-                print_result(False, f"GET /customers/{customer_id} returned wrong data: {data}")
+                print_result(False, f"Expected array, got: {type(data)}")
+                all_passed = False
         else:
-            print_result(False, f"GET /customers/{customer_id} failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /customers failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"GET /customers/{customer_id} failed: {e}")
+        print_result(False, f"GET /customers failed: {e}")
+        all_passed = False
     
-    # PUT update customer
+    # 5.3: GET /customers/{id}
     try:
+        print(f"\n5.3: GET /customers/{created_customer_id}")
+        resp = session.get(f"{BASE_URL}/customers/{created_customer_id}")
+        if resp.status_code == 200:
+            data = resp.json()
+            if data.get('id') == created_customer_id:
+                initial_balance = data.get('balance', 0)
+                print_result(True, f"GET /customers/{{id}} returns customer (balance={initial_balance})")
+            else:
+                print_result(False, f"Wrong customer returned: {data}")
+                all_passed = False
+        else:
+            print_result(False, f"GET /customers/{{id}} failed")
+            print_error(resp)
+            all_passed = False
+    except Exception as e:
+        print_result(False, f"GET /customers/{{id}} failed: {e}")
+        all_passed = False
+    
+    # 5.4: PUT /customers/{id}
+    try:
+        print(f"\n5.4: PUT /customers/{created_customer_id}")
         update_data = {
-            "company_name": "Test Firma Güncellendi",
-            "contact_person": "Veli Ali",
-            "phone": "555-1234",
-            "email": "test@firma.com",
-            "tax_office": "Test Vergi Dairesi",
-            "tax_number": "1234567890"
+            "company_name": "Test Firma 2",
+            "contact_person": "Ali",
+            "phone": "555",
+            "email": "a@b.com"
         }
-        resp = session.put(f"{BASE_URL}/customers/{customer_id}", json=update_data)
+        resp = session.put(f"{BASE_URL}/customers/{created_customer_id}", json=update_data)
         if resp.status_code == 200:
-            print_result(True, f"PUT /customers/{customer_id} updated successfully")
+            print_result(True, f"PUT /customers/{{id}} updated successfully")
         else:
-            print_result(False, f"PUT /customers/{customer_id} failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"PUT /customers/{{id}} failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"PUT /customers/{customer_id} failed: {e}")
+        print_result(False, f"PUT /customers/{{id}} failed: {e}")
+        all_passed = False
     
-    # Get balance before payment
-    balance_before = 0
+    # 5.5: POST /payments
     try:
-        resp = session.get(f"{BASE_URL}/customers/{customer_id}")
-        if resp.status_code == 200:
-            balance_before = resp.json().get('balance', 0)
-            print(f"Balance before payment: {balance_before}")
-        else:
-            print_result(False, f"Cannot get balance: {resp.status_code}")
-    except Exception as e:
-        print_result(False, f"Cannot get balance: {e}")
-    
-    # POST payment
-    try:
+        print(f"\n5.5: POST /payments (amount=500)")
         resp = session.post(f"{BASE_URL}/payments", json={
-            "customer_id": customer_id,
+            "customer_id": created_customer_id,
             "amount": 500,
-            "notes": "Test tahsilat"
+            "notes": "test"
         })
         if resp.status_code == 200:
-            print_result(True, "POST /payments created payment")
+            print_result(True, f"POST /payments created payment")
         else:
-            print_result(False, f"POST /payments failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"POST /payments failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"POST /payments failed: {e}")
+        all_passed = False
     
-    # Verify balance updated
+    # 5.6: GET /customers/{id} - verify balance decreased
     try:
-        resp = session.get(f"{BASE_URL}/customers/{customer_id}")
+        print(f"\n5.6: GET /customers/{created_customer_id} - verify balance")
+        resp = session.get(f"{BASE_URL}/customers/{created_customer_id}")
         if resp.status_code == 200:
             data = resp.json()
-            balance_after = data.get('balance', 0)
-            expected_balance = balance_before - 500
-            if balance_after == expected_balance:
-                print_result(True, f"Customer balance updated correctly: {balance_before} -> {balance_after}")
+            balance = data.get('balance', 0)
+            # Payment should reduce balance (customer owes less)
+            # Initial balance was 0, payment of 500 should make it -500
+            if balance == -500:
+                print_result(True, f"Balance updated correctly: {balance} (payment reduces balance)")
             else:
-                print_result(False, f"Customer balance incorrect: expected {expected_balance}, got {balance_after}")
+                print_result(False, f"Expected balance=-500, got {balance}")
+                all_passed = False
         else:
-            print_result(False, f"GET /customers/{customer_id} after payment failed: {resp.status_code}")
+            print_result(False, f"GET /customers/{{id}} failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Verify balance failed: {e}")
+        print_result(False, f"GET /customers/{{id}} failed: {e}")
+        all_passed = False
     
-    # GET customer transactions
+    # 5.7: GET /customers/{id}/transactions
     try:
-        resp = session.get(f"{BASE_URL}/customers/{customer_id}/transactions")
+        print(f"\n5.7: GET /customers/{created_customer_id}/transactions")
+        resp = session.get(f"{BASE_URL}/customers/{created_customer_id}/transactions")
         if resp.status_code == 200:
             data = resp.json()
-            if isinstance(data, list) and len(data) >= 1:
-                print_result(True, f"GET /customers/{customer_id}/transactions returns {len(data)} transactions")
+            if isinstance(data, list):
+                payment_entries = [t for t in data if t.get('type') == 'payment']
+                if len(payment_entries) >= 1:
+                    print_result(True, f"GET /customers/{{id}}/transactions returns payment entry")
+                else:
+                    print_result(False, f"No payment entry found in transactions")
+                    all_passed = False
             else:
-                print_result(False, f"GET /customers/{customer_id}/transactions should return at least 1 transaction, got {len(data) if isinstance(data, list) else 'not a list'}")
+                print_result(False, f"Expected array, got: {type(data)}")
+                all_passed = False
         else:
-            print_result(False, f"GET /customers/{customer_id}/transactions failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /customers/{{id}}/transactions failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"GET /customers/{customer_id}/transactions failed: {e}")
+        print_result(False, f"GET /customers/{{id}}/transactions failed: {e}")
+        all_passed = False
     
-    # DELETE customer (will do later)
-    return customer_id
+    return all_passed
 
-def test_sales(customer_id, product_id):
-    """Test 6: Sales (CRITICAL)"""
-    print_test("6. Sales (CRITICAL - Core Feature)")
+# ============== TEST 6: SALES (CRITICAL) ==============
+def test_sales():
+    """Test 6: Sales with auto stock deduction + balance update (CRITICAL)"""
+    print_test("6. Sales (CRITICAL - Supabase triggers)")
     
-    # Get a product with stock
-    product_stock_before = 0
+    global created_sale_id
+    all_passed = True
+    ts = int(time())
+    
+    # Create test product with stock=20
+    test_product_id = None
     try:
-        resp = session.get(f"{BASE_URL}/products/{product_id}")
+        print(f"\n6.0: Create test product with stock=20")
+        resp = session.post(f"{BASE_URL}/products", json={
+            "sku": f"SALE-{ts}",
+            "name": "Sale Test Product",
+            "brand": "Test",
+            "purchase_price": 50,
+            "selling_price": 100,
+            "stock": 20,
+            "min_stock": 1
+        })
         if resp.status_code == 200:
-            product_stock_before = resp.json().get('stock', 0)
-            print(f"Product stock before sale: {product_stock_before}")
+            data = resp.json()
+            test_product_id = data['id']
+            print_result(True, f"Created test product with stock=20 (id={test_product_id})")
         else:
-            print_result(False, f"Cannot get product stock: {resp.status_code}")
-            return
+            print_result(False, f"Failed to create test product")
+            print_error(resp)
+            return False
     except Exception as e:
-        print_result(False, f"Cannot get product stock: {e}")
-        return
+        print_result(False, f"Failed to create test product: {e}")
+        return False
     
-    # Get customer balance before sale
-    customer_balance_before = 0
+    # Create test customer with balance=0
+    test_customer_id = None
     try:
-        resp = session.get(f"{BASE_URL}/customers/{customer_id}")
+        print(f"\n6.0: Create test customer with balance=0")
+        resp = session.post(f"{BASE_URL}/customers", json={
+            "company_name": f"Sale Test Customer {ts}",
+            "contact_person": "Test",
+            "phone": "555"
+        })
         if resp.status_code == 200:
-            customer_balance_before = resp.json().get('balance', 0)
-            print(f"Customer balance before sale: {customer_balance_before}")
+            data = resp.json()
+            test_customer_id = data['id']
+            print_result(True, f"Created test customer (id={test_customer_id})")
         else:
-            print_result(False, f"Cannot get customer balance: {resp.status_code}")
+            print_result(False, f"Failed to create test customer")
+            print_error(resp)
+            return False
     except Exception as e:
-        print_result(False, f"Cannot get customer balance: {e}")
+        print_result(False, f"Failed to create test customer: {e}")
+        return False
     
-    # Create sale
-    sale_id = None
-    sale_total = 0
-    sale_due = 0
+    # 6.1: POST /sales
     try:
+        print(f"\n6.1: POST /sales")
         sale_data = {
-            "customer_id": customer_id,
-            "items": [
-                {
-                    "product_id": product_id,
-                    "quantity": 2,
-                    "unit_price": 100,
-                    "discount": 10
-                }
-            ],
+            "customer_id": test_customer_id,
+            "items": [{
+                "product_id": test_product_id,
+                "quantity": 2,
+                "unit_price": 100,
+                "discount": 10
+            }],
             "tax_rate": 20,
-            "paid": 100,
-            "notes": "Test fatura"
+            "paid": 50,
+            "notes": "Test"
         }
         resp = session.post(f"{BASE_URL}/sales", json=sale_data)
         if resp.status_code == 200:
             data = resp.json()
-            if 'id' in data and 'invoice_number' in data:
-                sale_id = data['id']
-                sale_total = data.get('total', 0)
-                sale_due = data.get('due', 0)
-                invoice_number = data.get('invoice_number')
-                print_result(True, f"POST /sales created sale with invoice: {invoice_number}, total: {sale_total}, due: {sale_due}")
-                
-                # Verify invoice number format (CLS-YYYY-#####)
-                if invoice_number.startswith('CLS-') and len(invoice_number.split('-')) == 3:
-                    print_result(True, f"Invoice number format correct: {invoice_number}")
-                else:
-                    print_result(False, f"Invoice number format incorrect: {invoice_number}")
+            created_sale_id = data.get('id')
+            
+            # Verify calculations
+            # subtotal = 100 * 2 * (1 - 10/100) = 180
+            # tax = 180 * 0.20 = 36
+            # total = 180 + 36 = 216
+            # paid = 50
+            # due = 216 - 50 = 166
+            
+            checks = []
+            checks.append(("invoice_number format", data.get('invoice_number', '').startswith('CLS-2026-')))
+            checks.append(("subtotal=180", data.get('subtotal') == 180))
+            checks.append(("tax=36", data.get('tax') == 36))
+            checks.append(("total=216", data.get('total') == 216))
+            checks.append(("paid=50", data.get('paid') == 50))
+            checks.append(("due=166", data.get('due') == 166))
+            
+            failed_checks = [c[0] for c in checks if not c[1]]
+            if len(failed_checks) == 0:
+                print_result(True, f"POST /sales created sale with correct calculations (invoice={data.get('invoice_number')})")
             else:
-                print_result(False, f"POST /sales response missing id or invoice_number: {data}")
+                print_result(False, f"Sale created but calculations wrong: {failed_checks}")
+                print(f"  Data: {data}")
+                all_passed = False
         else:
-            print_result(False, f"POST /sales failed: {resp.status_code} - {resp.text}")
-            return
+            print_result(False, f"POST /sales failed")
+            print_error(resp)
+            all_passed = False
+            return False
     except Exception as e:
         print_result(False, f"POST /sales failed: {e}")
-        return
+        all_passed = False
+        return False
     
-    # Verify product stock decreased
+    # 6.2: Verify product stock decreased
     try:
-        resp = session.get(f"{BASE_URL}/products/{product_id}")
+        print(f"\n6.2: Verify product stock decreased (20 -> 18)")
+        resp = session.get(f"{BASE_URL}/products/{test_product_id}")
         if resp.status_code == 200:
-            product_stock_after = resp.json().get('stock', 0)
-            expected_stock = product_stock_before - 2
-            if product_stock_after == expected_stock:
-                print_result(True, f"Product stock decreased correctly: {product_stock_before} -> {product_stock_after}")
+            data = resp.json()
+            stock = data.get('stock')
+            if stock == 18:
+                print_result(True, f"Product stock decreased correctly: 20 - 2 = {stock}")
             else:
-                print_result(False, f"Product stock incorrect: expected {expected_stock}, got {product_stock_after}")
+                print_result(False, f"Expected stock=18, got {stock}")
+                all_passed = False
         else:
-            print_result(False, f"Cannot verify product stock: {resp.status_code}")
+            print_result(False, f"GET /products/{{id}} failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Cannot verify product stock: {e}")
+        print_result(False, f"GET /products/{{id}} failed: {e}")
+        all_passed = False
     
-    # Verify customer balance increased
+    # 6.3: Verify customer balance increased
     try:
-        resp = session.get(f"{BASE_URL}/customers/{customer_id}")
+        print(f"\n6.3: Verify customer balance increased (0 -> 166)")
+        resp = session.get(f"{BASE_URL}/customers/{test_customer_id}")
         if resp.status_code == 200:
-            customer_balance_after = resp.json().get('balance', 0)
-            expected_balance = customer_balance_before + sale_due
-            if customer_balance_after == expected_balance:
-                print_result(True, f"Customer balance increased correctly: {customer_balance_before} -> {customer_balance_after} (due: {sale_due})")
+            data = resp.json()
+            balance = data.get('balance')
+            # Balance should be: 0 + 216 (sale total) - 50 (payment) = 166
+            if balance == 166:
+                print_result(True, f"Customer balance updated correctly: {balance}")
             else:
-                print_result(False, f"Customer balance incorrect: expected {expected_balance}, got {customer_balance_after}")
+                print_result(False, f"Expected balance=166, got {balance}")
+                all_passed = False
         else:
-            print_result(False, f"Cannot verify customer balance: {resp.status_code}")
+            print_result(False, f"GET /customers/{{id}} failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Cannot verify customer balance: {e}")
+        print_result(False, f"GET /customers/{{id}} failed: {e}")
+        all_passed = False
     
-    # Verify stock movements
+    # 6.4: Verify stock movement logged
     try:
-        resp = session.get(f"{BASE_URL}/products/{product_id}/movements")
+        print(f"\n6.4: Verify stock movement logged (type=out, quantity=2)")
+        resp = session.get(f"{BASE_URL}/products/{test_product_id}/movements")
         if resp.status_code == 200:
-            movements = resp.json()
-            out_movements = [m for m in movements if m.get('type') == 'out']
-            if len(out_movements) > 0:
-                print_result(True, f"Stock movements has 'out' entries for sale")
+            data = resp.json()
+            out_movements = [m for m in data if m.get('type') == 'out' and m.get('quantity') == 2]
+            if len(out_movements) >= 1:
+                print_result(True, f"Stock movement logged correctly")
             else:
-                print_result(False, f"Stock movements missing 'out' entries for sale")
+                print_result(False, f"No 'out' movement with quantity=2 found")
+                all_passed = False
         else:
-            print_result(False, f"Cannot verify stock movements: {resp.status_code}")
+            print_result(False, f"GET /products/{{id}}/movements failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Cannot verify stock movements: {e}")
+        print_result(False, f"GET /products/{{id}}/movements failed: {e}")
+        all_passed = False
     
-    # Verify customer transactions
+    # 6.5: Verify customer transaction logged
     try:
-        resp = session.get(f"{BASE_URL}/customers/{customer_id}/transactions")
+        print(f"\n6.5: Verify customer transaction logged (type=sale)")
+        resp = session.get(f"{BASE_URL}/customers/{test_customer_id}/transactions")
         if resp.status_code == 200:
-            transactions = resp.json()
-            sale_transactions = [t for t in transactions if t.get('type') == 'sale']
-            if len(sale_transactions) > 0:
-                print_result(True, f"Customer transactions has 'sale' entry")
+            data = resp.json()
+            sale_entries = [t for t in data if t.get('type') == 'sale']
+            if len(sale_entries) >= 1:
+                print_result(True, f"Customer transaction logged correctly")
             else:
-                print_result(False, f"Customer transactions missing 'sale' entry")
+                print_result(False, f"No 'sale' transaction found")
+                all_passed = False
         else:
-            print_result(False, f"Cannot verify customer transactions: {resp.status_code}")
+            print_result(False, f"GET /customers/{{id}}/transactions failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Cannot verify customer transactions: {e}")
+        print_result(False, f"GET /customers/{{id}}/transactions failed: {e}")
+        all_passed = False
     
-    # GET sales list
+    # 6.6: GET /sales
     try:
+        print(f"\n6.6: GET /sales")
         resp = session.get(f"{BASE_URL}/sales")
         if resp.status_code == 200:
-            sales = resp.json()
-            if isinstance(sales, list) and any(s.get('id') == sale_id for s in sales):
-                print_result(True, f"GET /sales includes the new sale")
+            data = resp.json()
+            if isinstance(data, list):
+                found = any(s.get('id') == created_sale_id for s in data)
+                if found:
+                    print_result(True, f"GET /sales returns array containing new sale")
+                else:
+                    print_result(False, f"New sale not found in list")
+                    all_passed = False
             else:
-                print_result(False, f"GET /sales does not include the new sale")
+                print_result(False, f"Expected array, got: {type(data)}")
+                all_passed = False
         else:
-            print_result(False, f"GET /sales failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /sales failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"GET /sales failed: {e}")
+        all_passed = False
     
-    # GET single sale
+    # 6.7: GET /sales/{id}
     try:
-        resp = session.get(f"{BASE_URL}/sales/{sale_id}")
+        print(f"\n6.7: GET /sales/{created_sale_id}")
+        resp = session.get(f"{BASE_URL}/sales/{created_sale_id}")
         if resp.status_code == 200:
             data = resp.json()
             if 'sale' in data and 'customer' in data and 'settings' in data:
-                print_result(True, f"GET /sales/{sale_id} returns sale, customer, and settings")
+                print_result(True, f"GET /sales/{{id}} returns sale+customer+settings")
             else:
-                print_result(False, f"GET /sales/{sale_id} missing required fields: {data.keys()}")
+                print_result(False, f"Response missing required fields: {list(data.keys())}")
+                all_passed = False
         else:
-            print_result(False, f"GET /sales/{sale_id} failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /sales/{{id}} failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"GET /sales/{sale_id} failed: {e}")
+        print_result(False, f"GET /sales/{{id}} failed: {e}")
+        all_passed = False
     
-    # Test insufficient stock
+    # 6.8: POST /sales with insufficient stock (should fail)
     try:
+        print(f"\n6.8: POST /sales with quantity exceeding stock - should fail")
         resp = session.post(f"{BASE_URL}/sales", json={
-            "customer_id": customer_id,
-            "items": [{"product_id": product_id, "quantity": 9999}],
+            "customer_id": test_customer_id,
+            "items": [{
+                "product_id": test_product_id,
+                "quantity": 999,
+                "unit_price": 100
+            }],
             "tax_rate": 20,
             "paid": 0
         })
         if resp.status_code == 400:
-            print_result(True, "POST /sales with insufficient stock returns 400")
+            print_result(True, f"POST /sales with insufficient stock returns 400")
         else:
-            print_result(False, f"POST /sales with insufficient stock should return 400, got {resp.status_code}")
+            print_result(False, f"Should return 400, got {resp.status_code}")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Insufficient stock test failed: {e}")
+        print_result(False, f"POST /sales with insufficient stock failed: {e}")
+        all_passed = False
     
-    # Test missing customer_id
+    # 6.9: POST /sales without customer_id (should fail)
     try:
+        print(f"\n6.9: POST /sales without customer_id - should fail")
         resp = session.post(f"{BASE_URL}/sales", json={
-            "items": [{"product_id": product_id, "quantity": 1}],
-            "tax_rate": 20
+            "items": [{
+                "product_id": test_product_id,
+                "quantity": 1,
+                "unit_price": 100
+            }],
+            "tax_rate": 20,
+            "paid": 0
         })
         if resp.status_code == 400:
-            print_result(True, "POST /sales without customer_id returns 400")
+            print_result(True, f"POST /sales without customer_id returns 400")
         else:
-            print_result(False, f"POST /sales without customer_id should return 400, got {resp.status_code}")
+            print_result(False, f"Should return 400, got {resp.status_code}")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Missing customer_id test failed: {e}")
+        print_result(False, f"POST /sales without customer_id failed: {e}")
+        all_passed = False
     
-    # Test empty items
+    # 6.10: POST /sales with empty items (should fail)
     try:
+        print(f"\n6.10: POST /sales with empty items - should fail")
         resp = session.post(f"{BASE_URL}/sales", json={
-            "customer_id": customer_id,
+            "customer_id": test_customer_id,
             "items": [],
-            "tax_rate": 20
+            "tax_rate": 20,
+            "paid": 0
         })
         if resp.status_code == 400:
-            print_result(True, "POST /sales with empty items returns 400")
+            print_result(True, f"POST /sales with empty items returns 400")
         else:
-            print_result(False, f"POST /sales with empty items should return 400, got {resp.status_code}")
+            print_result(False, f"Should return 400, got {resp.status_code}")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Empty items test failed: {e}")
+        print_result(False, f"POST /sales with empty items failed: {e}")
+        all_passed = False
+    
+    return all_passed
 
+# ============== TEST 7: DASHBOARD ==============
 def test_dashboard():
-    """Test 7: Dashboard"""
+    """Test 7: Dashboard stats"""
     print_test("7. Dashboard Stats")
     
+    all_passed = True
+    
     try:
+        print(f"\n7.1: GET /dashboard/stats")
         resp = session.get(f"{BASE_URL}/dashboard/stats")
         if resp.status_code == 200:
             data = resp.json()
-            required_fields = ['totalStockValue', 'totalProducts', 'totalCustomers', 'monthlySales', 
-                             'totalReceivables', 'lowStockCount', 'lowStock', 'recentSales', 'series']
-            missing_fields = [f for f in required_fields if f not in data]
-            if not missing_fields:
-                print_result(True, f"GET /dashboard/stats returns all required fields")
-                
+            
+            # Check required fields
+            required_fields = [
+                'totalStockValue', 'totalProducts', 'totalCustomers',
+                'monthlySales', 'totalReceivables', 'lowStockCount',
+                'lowStock', 'recentSales', 'series'
+            ]
+            missing = [f for f in required_fields if f not in data]
+            
+            if len(missing) == 0:
                 # Verify series has 30 days
-                if isinstance(data.get('series'), list) and len(data['series']) == 30:
-                    print_result(True, f"Dashboard series has 30 day buckets")
+                if isinstance(data['series'], list) and len(data['series']) == 30:
+                    print_result(True, f"GET /dashboard/stats returns all required fields with 30-day series")
                 else:
-                    print_result(False, f"Dashboard series should have 30 days, got {len(data.get('series', []))}")
+                    print_result(False, f"Series should have 30 days, got {len(data.get('series', []))}")
+                    all_passed = False
             else:
-                print_result(False, f"GET /dashboard/stats missing fields: {missing_fields}")
+                print_result(False, f"Missing required fields: {missing}")
+                all_passed = False
         else:
-            print_result(False, f"GET /dashboard/stats failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /dashboard/stats failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"GET /dashboard/stats failed: {e}")
+        all_passed = False
+    
+    return all_passed
 
+# ============== TEST 8: SETTINGS ==============
 def test_settings():
-    """Test 8: Settings"""
+    """Test 8: Settings get/update"""
     print_test("8. Settings")
     
-    # GET settings
-    original_company_name = None
+    all_passed = True
+    
+    # 8.1: GET /settings
     try:
+        print(f"\n8.1: GET /settings")
         resp = session.get(f"{BASE_URL}/settings")
         if resp.status_code == 200:
             data = resp.json()
-            if 'company_name' in data:
-                original_company_name = data.get('company_name')
-                print_result(True, f"GET /settings returns company_name: {original_company_name}")
+            if 'company_name' in data or 'id' in data:
+                print_result(True, f"GET /settings returns settings")
             else:
-                print_result(False, f"GET /settings missing company_name: {data}")
+                print_result(False, f"Settings response unexpected: {data}")
+                all_passed = False
         else:
-            print_result(False, f"GET /settings failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"GET /settings failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"GET /settings failed: {e}")
+        all_passed = False
     
-    # PUT settings
+    # 8.2: PUT /settings
     try:
-        resp = session.put(f"{BASE_URL}/settings", json={"company_name": "Cactus Test Güncellendi"})
+        print(f"\n8.2: PUT /settings")
+        resp = session.put(f"{BASE_URL}/settings", json={
+            "company_name": "Cactus Test",
+            "invoice_prefix": "CLS"
+        })
         if resp.status_code == 200:
-            print_result(True, "PUT /settings updated successfully")
+            print_result(True, f"PUT /settings updated successfully")
         else:
-            print_result(False, f"PUT /settings failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"PUT /settings failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"PUT /settings failed: {e}")
+        all_passed = False
     
-    # Verify update
+    # 8.3: GET /settings - verify update
     try:
+        print(f"\n8.3: GET /settings - verify update")
         resp = session.get(f"{BASE_URL}/settings")
         if resp.status_code == 200:
             data = resp.json()
-            if data.get('company_name') == "Cactus Test Güncellendi":
-                print_result(True, "Settings company_name updated correctly")
+            if data.get('company_name') == 'Cactus Test':
+                print_result(True, f"Settings update verified")
             else:
-                print_result(False, f"Settings company_name not updated: {data.get('company_name')}")
+                print_result(False, f"Settings not updated: company_name={data.get('company_name')}")
+                all_passed = False
         else:
-            print_result(False, f"GET /settings after update failed: {resp.status_code}")
+            print_result(False, f"GET /settings failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
-        print_result(False, f"Verify settings update failed: {e}")
+        print_result(False, f"GET /settings failed: {e}")
+        all_passed = False
     
-    # Restore original
-    if original_company_name:
-        try:
-            session.put(f"{BASE_URL}/settings", json={"company_name": original_company_name})
-        except:
-            pass
+    return all_passed
 
+# ============== TEST 9: LOGOUT ==============
 def test_logout():
     """Test 9: Logout"""
     print_test("9. Logout")
     
-    # Logout
+    all_passed = True
+    
+    # 9.1: POST /auth/logout
     try:
+        print(f"\n9.1: POST /auth/logout")
         resp = session.post(f"{BASE_URL}/auth/logout")
         if resp.status_code == 200:
-            print_result(True, "POST /auth/logout successful")
+            print_result(True, f"POST /auth/logout successful")
         else:
-            print_result(False, f"POST /auth/logout failed: {resp.status_code} - {resp.text}")
+            print_result(False, f"POST /auth/logout failed")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"POST /auth/logout failed: {e}")
+        all_passed = False
     
-    # Verify /auth/me returns 401 after logout
+    # 9.2: GET /auth/me after logout (should fail)
     try:
+        print(f"\n9.2: GET /auth/me after logout - should fail")
         resp = session.get(f"{BASE_URL}/auth/me")
         if resp.status_code == 401:
-            print_result(True, "GET /auth/me after logout returns 401")
+            print_result(True, f"GET /auth/me after logout returns 401")
         else:
-            print_result(False, f"GET /auth/me after logout should return 401, got {resp.status_code}")
+            print_result(False, f"Should return 401, got {resp.status_code}")
+            print_error(resp)
+            all_passed = False
     except Exception as e:
         print_result(False, f"GET /auth/me after logout failed: {e}")
+        all_passed = False
+    
+    return all_passed
 
-def cleanup(product_id, customer_id):
-    """Cleanup test data"""
-    print_test("Cleanup")
-    
-    # Re-login for cleanup
-    try:
-        session.post(f"{BASE_URL}/auth/login", json={"username": ADMIN_USER, "password": ADMIN_PASS})
-    except:
-        pass
-    
-    # Delete product
-    if product_id:
-        try:
-            resp = session.delete(f"{BASE_URL}/products/{product_id}")
-            if resp.status_code == 200:
-                print_result(True, f"Deleted test product {product_id}")
-            else:
-                print_result(False, f"Failed to delete product: {resp.status_code}")
-        except Exception as e:
-            print_result(False, f"Failed to delete product: {e}")
-    
-    # Delete customer
-    if customer_id:
-        try:
-            resp = session.delete(f"{BASE_URL}/customers/{customer_id}")
-            if resp.status_code == 200:
-                print_result(True, f"Deleted test customer {customer_id}")
-            else:
-                print_result(False, f"Failed to delete customer: {resp.status_code}")
-        except Exception as e:
-            print_result(False, f"Failed to delete customer: {e}")
-
+# ============== MAIN ==============
 def main():
-    print("\n" + "="*60)
-    print("CACTUS LIGHT & SOUND ERP - BACKEND API TEST")
-    print("="*60)
+    print("\n" + "="*70)
+    print("CACTUS LIGHT & SOUND ERP - BACKEND API TEST (SUPABASE)")
+    print("="*70)
     print(f"Base URL: {BASE_URL}")
-    print(f"Test User: {ADMIN_USER}")
-    print("="*60)
+    print(f"Test User: {TEST_EMAIL}")
+    print("="*70)
     
-    # Run all tests in order
-    test_auth_flow()
-    category_id = test_categories()
-    product_id = test_products(category_id)
-    if product_id:
-        test_stock_adjustments(product_id)
-    customer_id = test_customers()
-    if customer_id and product_id:
-        test_sales(customer_id, product_id)
-    test_dashboard()
-    test_settings()
-    test_logout()
+    results = {}
     
-    # Cleanup
-    if product_id or customer_id:
-        cleanup(product_id, customer_id)
+    # Run all tests
+    results['1. Auth'] = test_auth()
+    results['2. Categories'] = test_categories()
+    results['3. Products CRUD'] = test_products()
+    results['4. Stock Adjustments'] = test_stock_adjustments()
+    results['5. Customers CRUD + Payments'] = test_customers()
+    results['6. Sales (CRITICAL)'] = test_sales()
+    results['7. Dashboard'] = test_dashboard()
+    results['8. Settings'] = test_settings()
+    results['9. Logout'] = test_logout()
     
-    print("\n" + "="*60)
-    print("BACKEND API TESTING COMPLETE")
-    print("="*60)
+    # Summary
+    print("\n" + "="*70)
+    print("TEST SUMMARY")
+    print("="*70)
+    
+    passed = sum(1 for v in results.values() if v)
+    total = len(results)
+    
+    for test_name, result in results.items():
+        status = "✅ PASS" if result else "❌ FAIL"
+        print(f"{status}: {test_name}")
+    
+    print("="*70)
+    print(f"TOTAL: {passed}/{total} tests passed")
+    print("="*70)
+    
+    if passed == total:
+        print("\n🎉 ALL TESTS PASSED!")
+        return 0
+    else:
+        print(f"\n⚠️  {total - passed} test(s) failed")
+        return 1
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

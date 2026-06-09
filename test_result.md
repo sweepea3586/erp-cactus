@@ -110,7 +110,7 @@ user_problem_statement: |
 backend:
   - task: "Authentication (login/logout/me with cookie session)"
     implemented: true
-    working: true
+    working: false
     file: "app/api/[[...path]]/route.js"
     stuck_count: 0
     priority: "high"
@@ -122,6 +122,9 @@ backend:
       - working: true
         agent: "testing"
         comment: "✅ ALL TESTS PASSED. Wrong credentials return 401. Login with admin/admin123 returns 200 with user object and sets cls_session cookie. GET /auth/me with cookie returns 200 with user. Without cookie returns 401. Protected endpoints (e.g., /products) return 401 without cookie. Logout clears session correctly."
+      - working: false
+        agent: "testing"
+        comment: "SUPABASE MIGRATION: ✅ Signup, login, /auth/me, logout all work correctly with Supabase cookies (sb-*). ❌ CRITICAL: GET /api/products without session returns 200 (HTML login page) instead of 401. Issue: middleware.js redirects unauthenticated API requests to /login instead of letting API return 401. Fix: Add '/api' to PUBLIC_PATHS in middleware.js or skip redirect for API routes."
 
   - task: "Dashboard stats endpoint"
     implemented: true
@@ -137,6 +140,9 @@ backend:
       - working: true
         agent: "testing"
         comment: "✅ ALL TESTS PASSED. GET /dashboard/stats returns all required fields: totalStockValue, totalProducts, totalCustomers, monthlySales, totalReceivables, lowStockCount, lowStock array, recentSales array, and series array with exactly 30 day buckets."
+      - working: true
+        agent: "testing"
+        comment: "SUPABASE MIGRATION: ✅ ALL TESTS PASSED. GET /api/dashboard/stats returns all required fields with 30-day series."
 
   - task: "Products CRUD + categories + stock adjust + movements"
     implemented: true
@@ -152,6 +158,9 @@ backend:
       - working: true
         agent: "testing"
         comment: "✅ ALL TESTS PASSED. Categories: GET returns 7 seeded categories, POST creates new category. Products: GET returns 4 seeded products, search with ?q=JBL filters correctly, POST creates product with initial stock movement, GET/PUT/DELETE work correctly, movements tracked. Stock adjust: IN/OUT/ADJUST all work, negative stock prevented (returns 400), movements logged correctly."
+      - working: true
+        agent: "testing"
+        comment: "SUPABASE MIGRATION: ✅ ALL TESTS PASSED. Categories: GET returns 7 defaults, POST creates. Products: CRUD works, search filters correctly, movements tracked. Stock adjust: IN/OUT/ADJUST work, negative stock prevented (400), movements logged."
 
   - task: "Customers CRUD + payments + transactions"
     implemented: true
@@ -167,6 +176,9 @@ backend:
       - working: true
         agent: "testing"
         comment: "✅ ALL TESTS PASSED. GET returns 3 seeded customers. POST creates customer successfully. GET/PUT/DELETE work correctly. POST /payments updates customer balance correctly (decreases by payment amount). Customer transactions endpoint returns payment entries."
+      - working: true
+        agent: "testing"
+        comment: "SUPABASE MIGRATION: ✅ ALL TESTS PASSED. CRUD works, POST /payments updates balance correctly (-500), transactions logged."
 
   - task: "Sales create with auto stock deduction + balance update"
     implemented: true
@@ -182,10 +194,13 @@ backend:
       - working: true
         agent: "testing"
         comment: "✅ ALL TESTS PASSED (CRITICAL FEATURE). POST /sales creates sale with correct invoice format (CLS-2026-01001). Product stock decreases automatically by quantity sold. Customer balance increases by 'due' amount (total - paid). Stock movements logged with type='out'. Customer transactions has 'sale' entry. GET /sales lists all sales. GET /sales/[id] returns sale+customer+settings. Validation working: insufficient stock returns 400, missing customer_id returns 400, empty items returns 400."
+      - working: true
+        agent: "testing"
+        comment: "SUPABASE MIGRATION: ✅ ALL TESTS PASSED (CRITICAL). Invoice format correct (CLS-2026-01003). Calculations: subtotal=180, tax=36, total=216, paid=50, due=166. Stock decreased (20→18). Customer balance updated (0→166). Stock movements and customer transactions logged. Validations work (insufficient stock, missing customer_id, empty items all return 400)."
 
   - task: "Settings get/update"
     implemented: true
-    working: true
+    working: false
     file: "app/api/[[...path]]/route.js"
     stuck_count: 0
     priority: "medium"
@@ -197,6 +212,9 @@ backend:
       - working: true
         agent: "testing"
         comment: "✅ ALL TESTS PASSED. GET /settings returns company_name and other settings. PUT /settings updates successfully. Changes verified by subsequent GET request."
+      - working: false
+        agent: "testing"
+        comment: "SUPABASE MIGRATION: ✅ GET /api/settings works. ❌ PUT /api/settings fails with 400: 'new row violates row-level security policy for table settings'. Issue: RLS policy requires admin role for write (schema.sql line 417-418), but test user is 'staff'. Main agent comment says 'herkes yazabilir' but RLS doesn't match. Fix: Change settings_write policy to allow all authenticated users, not just admins."
 
 frontend:
   - task: "Login page"
@@ -266,16 +284,26 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      İlk MVP sürümü tamamlandı. Lütfen tüm backend uç noktalarını test edin.
+      Supabase entegrasyonu tamamlandı! Şimdi tüm backend testlerini Supabase backend'iyle çalıştırın.
       
-      Login akışı: POST /api/auth/login {username: "admin", password: "admin123"} -> set-cookie 'cls_session', returns user. Tüm diğer endpoint'ler bu cookie olmadan 401 dönmeli.
+      Önemli değişiklikler:
+      - MongoDB tamamen kaldırıldı, her şey Supabase üzerinde
+      - Login artık /api/auth/login {email, password} kullanır (username DEĞİL)
+      - Yeni endpoint: POST /api/auth/signup {email, password, full_name}
+      - Storage: ürün görselleri için 'product-images' bucket, logo için 'company-logos'
+      - Cookie tabanlı auth: @supabase/ssr otomatik çerez yönetir (sb-* prefixli)
       
-      ÖNEMLİ test senaryoları:
-      1) Auth: Yanlış şifre 401, doğru şifre 200 + cookie. /api/auth/me cookie ile 200, olmadan 401.
-      2) Products CRUD: yeni ürün ekle, listele, ?q= ile ara, güncelle, sil. Stock adjust (in/out/adjust) ile stok değişsin ve /api/stock/movements'a kayıt düşsün.
-      3) Customers CRUD aynı şekilde + POST /api/payments ile bakiye azalmalı.
-      4) Sales: POST /api/sales ile çoklu kalem fatura oluştur; ürün stokları azalsın, müşteri bakiyesi total-paid kadar artsın, /api/stock/movements'a 'out' hareket eklensin, /api/sales listesinde görünsün, GET /api/sales/[id] sale+customer+settings döndürsün. Stok yetersizse 400 hatası ver.
-      5) Stok negatife düşmesin: POST /api/stock/adjust ile type=out ve stoktan fazla istersek 400 vermeli.
-      6) Dashboard: /api/dashboard/stats response'unda totalStockValue, totalProducts, lowStock, recentSales, series alanları olmalı.
+      Test akışı (önemli):
+      1) Önce /api/auth/signup ile yeni test kullanıcı oluşturun (unique email kullanın, örn. test{timestamp}@cactus.local)
+      2) /api/auth/login ile giriş yapın (Set-Cookie alır, sonraki isteklerde otomatik gelir)
+      3) Tüm diğer endpoint'leri requests.Session() ile test edin
       
-      Test scriptini cookie tabanlı (cookie jar) yapın, requests.Session() kullanın.
+      Notlar:
+      - Email confirmation kapalı (auto-confirm)
+      - İlk kayıt olan kullanıcı public.users tetikleyici ile auto-admin olur (ama mevcut DB'de zaten kullanıcılar var, yenisi 'staff' olabilir)
+      - operational tablolar tüm authenticated kullanıcılara açık (RLS = true)
+      - settings PUT artık upsert, herkes yazabilir
+      - Sales create: next_invoice_number RPC kullanır, sale_items trigger'ı stoğu düşürür, payments trigger'ı bakiyeyi günceller
+      - Stock yetersizse trigger EXCEPTION fırlatır, API bunu 400 olarak döndürür
+      
+      Test senaryoları aynı (önceki test_result.md'den), sadece login parameters {email, password}.

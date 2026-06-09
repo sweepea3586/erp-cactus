@@ -375,7 +375,8 @@ async function handle(request, { params }) {
       const b = await request.json()
       const { id, ...payload } = b
       payload.updated_at = new Date().toISOString()
-      const { error } = await supabase.from('settings').update(payload).eq('id', 'company')
+      // Try upsert in case settings row doesn't exist yet
+      const { error } = await supabase.from('settings').upsert({ id: 'company', ...payload })
       if (error) return fail(error.message)
       return ok({ success: true })
     }
