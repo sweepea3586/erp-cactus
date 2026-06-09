@@ -386,4 +386,4 @@ function TransactionBadge({ type }) {
 
   return <Badge className={`text-xs ${cfg.className}`}>{cfg.label}</Badge>
 }
-Commit changes
+
