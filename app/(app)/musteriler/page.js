@@ -1,133 +1,388 @@
 'use client'
+
 import { useState } from 'react'
-import useSWR, { mutate } from 'swr'
-import { Card, CardContent } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
-import { Button } from '@/components/ui/button'
-import { Label } from '@/components/ui/label'
-import { Textarea } from '@/components/ui/textarea'
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '@/components/ui/dialog'
-import { Plus, Search, Pencil, Trash2, Wallet } from 'lucide-react'
-import { formatTRY } from '@/lib/format'
-import { toast } from 'sonner'
+import useSWR from 'swr'
+import { useParams } from 'next/navigation'
 import Link from 'next/link'
+import { Card, CardContent } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import {
+  ArrowLeft,
+  Building2,
+  User,
+  Phone,
+  Mail,
+  MapPin,
+  Receipt,
+  Hash,
+  ChevronDown,
+  ChevronRight,
+  ShoppingCart,
+  TrendingUp,
+  CalendarCheck,
+  AlertCircle,
+} from 'lucide-react'
+import { formatTRY, formatDateTime } from '@/lib/format'
 
-const fetcher = (u) => fetch(u).then(r => r.json())
-const empty = { company_name: '', contact_person: '', phone: '', email: '', address: '', tax_office: '', tax_number: '', notes: '', balance: 0 }
+const fetcher = (u) => fetch(u).then((r) => r.json())
 
-export default function CustomersPage() {
-  const [q, setQ] = useState('')
-  const { data: customers = [] } = useSWR(`/api/customers?q=${encodeURIComponent(q)}`, fetcher)
+function StatCard({ icon: Icon, label, value, accent }) {
+  return (
+    <Card>
+      <CardContent className="p-4 flex items-center gap-4">
+        <div className={`p-2 rounded-lg ${accent}`}>
+          <Icon className="h-5 w-5" />
+        </div>
+        <div>
+          <p className="text-xs text-slate-500 mb-0.5">{label}</p>
+          <p className="text-base font-semibold text-slate-800 leading-tight">{value}</p>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+// items come pre-loaded from GET /api/sales/:id → { sale: { ...sale, items: [...] } }
+function SaleRow({ sale, items = [] }) {
   const [open, setOpen] = useState(false)
-  const [payOpen, setPayOpen] = useState(false)
-  const [editing, setEditing] = useState(null)
-  const [form, setForm] = useState(empty)
-  const [pay, setPay] = useState({ customer_id: '', amount: '', method: 'cash', notes: '' })
 
-  function startCreate() { setEditing(null); setForm(empty); setOpen(true) }
-  function startEdit(c) { setEditing(c); setForm({ ...empty, ...c }); setOpen(true) }
+  return (
+    <>
+      <tr
+        className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer select-none"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <td className="px-4 py-3 w-8 text-slate-400">
+          {open ? (
+            <ChevronDown className="h-4 w-4" />
+          ) : (
+            <ChevronRight className="h-4 w-4" />
+          )}
+        </td>
+        <td className="px-4 py-3 text-slate-500 text-xs">{formatDateTime(sale.created_at)}</td>
+        <td className="px-4 py-3">
+          <Link
+            href={`/satislar/${sale.id}`}
+            className="font-mono text-emerald-600 hover:underline text-sm"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {sale.invoice_number}
+          </Link>
+        </td>
+        <td className="px-4 py-3 text-right font-medium text-slate-800">{formatTRY(sale.total)}</td>
+        <td className="px-4 py-3 text-right text-slate-500">{formatTRY(sale.paid)}</td>
+        <td className="px-4 py-3 text-right">
+          {sale.due > 0 ? (
+            <Badge variant="destructive">{formatTRY(sale.due)}</Badge>
+          ) : (
+            <Badge className="bg-emerald-100 text-emerald-700 hover:bg-emerald-100">Ödendi</Badge>
+          )}
+        </td>
+      </tr>
 
-  async function save() {
-    if (!form.company_name) return toast.error('Firma adı zorunlu')
-    const url = editing ? `/api/customers/${editing.id}` : '/api/customers'
-    const res = await fetch(url, { method: editing ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(form) })
-    if (!res.ok) return toast.error('Kaydedilemedi')
-    toast.success(editing ? 'Müşteri güncellendi' : 'Müşteri eklendi')
-    setOpen(false); mutate((k) => typeof k === 'string' && k.startsWith('/api/customers'))
+      {open && (
+        <tr className="bg-slate-50 border-b border-slate-100">
+          <td colSpan={6} className="px-8 py-3">
+            {items.length === 0 ? (
+              <p className="text-xs text-slate-400 py-2">Ürün bulunamadı.</p>
+            ) : (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="text-slate-500 border-b border-slate-200">
+                    <th className="pb-1 text-left font-medium">Ürün</th>
+                    <th className="pb-1 text-right font-medium">Adet</th>
+                    <th className="pb-1 text-right font-medium">Birim Fiyat</th>
+                    <th className="pb-1 text-right font-medium">Satır Toplamı</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((item, i) => (
+                    <tr key={i} className="border-b border-slate-100 last:border-0">
+                      <td className="py-1.5 text-slate-700">{item.product_name}</td>
+                      <td className="py-1.5 text-right text-slate-600">{item.quantity}</td>
+                      <td className="py-1.5 text-right text-slate-600">{formatTRY(item.unit_price)}</td>
+                      <td className="py-1.5 text-right font-medium text-slate-800">{formatTRY(item.line_total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </td>
+        </tr>
+      )}
+    </>
+  )
+}
+
+export default function MusteriDetayPage() {
+  const { id } = useParams()
+
+  const { data: customer, isLoading: loadingCustomer } = useSWR(
+    id ? `/api/customers/${id}` : null,
+    fetcher
+  )
+
+  // Fetch all sales to find which ones belong to this customer
+  const { data: allSales = [] } = useSWR('/api/sales', fetcher)
+  const salesForCustomer = allSales.filter(
+    (s) => s.customer_id === id || s.customer_id === Number(id)
+  )
+
+  // Fetch full detail (with items) for each of this customer's sales in parallel
+  const saleIds = salesForCustomer.map((s) => s.id)
+  const { data: saleDetails = [] } = useSWR(
+    saleIds.length > 0 ? ['sale-details', ...saleIds] : null,
+    async () => {
+      const results = await Promise.all(
+        saleIds.map((sid) =>
+          fetch(`/api/sales/${sid}`)
+            .then((r) => r.json())
+            .then((d) => d.sale ?? d) // handle both { sale: {...} } and bare object
+        )
+      )
+      return results
+    }
+  )
+
+  // Use detailed sales (with embedded items) when available, fall back to list data
+  const sales = saleDetails.length > 0 ? saleDetails : salesForCustomer
+
+  const { data: transactions = [] } = useSWR(
+    id ? `/api/customers/${id}/transactions` : null,
+    fetcher
+  )
+
+  // Computed stats
+  const totalPurchase = sales.reduce((sum, s) => sum + (s.total || 0), 0)
+  const totalSaleCount = sales.length
+  const lastSaleDate =
+    sales.length > 0
+      ? formatDateTime(
+          sales.reduce((latest, s) =>
+            new Date(s.created_at) > new Date(latest.created_at) ? s : latest
+          ).created_at
+        )
+      : '—'
+  const openBalance = sales.reduce((sum, s) => sum + (s.due || 0), 0)
+
+  if (loadingCustomer) {
+    return (
+      <div className="flex items-center justify-center h-64 text-slate-500 text-sm">
+        Yükleniyor…
+      </div>
+    )
   }
 
-  async function remove(id) {
-    if (!confirm('Silmek istediğinize emin misiniz?')) return
-    await fetch(`/api/customers/${id}`, { method: 'DELETE' })
-    toast.success('Silindi'); mutate((k) => typeof k === 'string' && k.startsWith('/api/customers'))
-  }
-
-  async function recordPayment() {
-    if (!pay.amount || Number(pay.amount) <= 0) return toast.error('Tutar girin')
-    const res = await fetch('/api/payments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...pay, amount: Number(pay.amount) }) })
-    if (!res.ok) return toast.error('Hata oluştu')
-    toast.success('Tahsilat kaydedildi')
-    setPayOpen(false); setPay({ customer_id: '', amount: '', method: 'cash', notes: '' })
-    mutate((k) => typeof k === 'string' && k.startsWith('/api/customers'))
+  if (!customer) {
+    return (
+      <div className="flex flex-col items-center justify-center h-64 gap-3 text-slate-500">
+        <AlertCircle className="h-8 w-8 text-slate-300" />
+        <p className="text-sm">Müşteri bulunamadı.</p>
+        <Link href="/musteriler">
+          <Button variant="outline" size="sm">
+            <ArrowLeft className="h-4 w-4 mr-1" /> Geri Dön
+          </Button>
+        </Link>
+      </div>
+    )
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">
-        <div className="relative flex-1 max-w-md">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
-          <Input placeholder="Müşteri ara..." className="pl-9" value={q} onChange={(e) => setQ(e.target.value)} />
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center gap-3">
+        <Link href="/musteriler">
+          <Button variant="ghost" size="icon" className="h-8 w-8 text-slate-500 hover:text-slate-800">
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+        </Link>
+        <div>
+          <h1 className="text-xl font-semibold text-slate-800">{customer.company_name || customer.name}</h1>
+          {customer.contact_person && (
+            <p className="text-sm text-slate-500">{customer.contact_person}</p>
+          )}
         </div>
-        <Button onClick={startCreate} className="bg-emerald-600 hover:bg-emerald-700"><Plus className="h-4 w-4 mr-2" />Yeni Müşteri</Button>
       </div>
 
+      {/* Stats */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <StatCard
+          icon={TrendingUp}
+          label="Toplam Alışveriş"
+          value={formatTRY(totalPurchase)}
+          accent="bg-emerald-50 text-emerald-600"
+        />
+        <StatCard
+          icon={ShoppingCart}
+          label="Toplam Satış Sayısı"
+          value={`${totalSaleCount} fatura`}
+          accent="bg-blue-50 text-blue-600"
+        />
+        <StatCard
+          icon={CalendarCheck}
+          label="Son Alışveriş"
+          value={lastSaleDate}
+          accent="bg-violet-50 text-violet-600"
+        />
+        <StatCard
+          icon={AlertCircle}
+          label="Açık Bakiye"
+          value={formatTRY(openBalance)}
+          accent={openBalance > 0 ? 'bg-red-50 text-red-500' : 'bg-slate-100 text-slate-400'}
+        />
+      </div>
+
+      {/* Two-column layout: customer info + transactions */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {/* Customer Info */}
+        <Card className="md:col-span-1">
+          <CardContent className="p-5 space-y-4">
+            <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wide">
+              Müşteri Bilgileri
+            </h2>
+
+            <InfoRow icon={Building2} label="Firma Adı" value={customer.company_name || customer.name} />
+            <InfoRow icon={User} label="İlgili Kişi" value={customer.contact_person} />
+            <InfoRow icon={Phone} label="Telefon" value={customer.phone} />
+            <InfoRow icon={Mail} label="E-Posta" value={customer.email} />
+            <InfoRow icon={MapPin} label="Adres" value={customer.address} />
+            <InfoRow icon={Receipt} label="Vergi Dairesi" value={customer.tax_office} />
+            <InfoRow icon={Hash} label="Vergi No" value={customer.tax_number} />
+
+            {customer.balance !== undefined && (
+              <div className="pt-3 border-t border-slate-100">
+                <p className="text-xs text-slate-500 mb-1">Güncel Bakiye</p>
+                <p
+                  className={`text-lg font-bold ${
+                    customer.balance < 0 ? 'text-red-600' : 'text-emerald-600'
+                  }`}
+                >
+                  {formatTRY(customer.balance)}
+                </p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Transactions */}
+        <Card className="md:col-span-2">
+          <CardContent className="p-0">
+            <div className="px-5 py-4 border-b border-slate-100">
+              <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wide">
+                Hesap Hareketleri
+              </h2>
+            </div>
+            <div className="overflow-auto max-h-72">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 border-b border-slate-200 sticky top-0">
+                  <tr className="text-left">
+                    <th className="px-4 py-2.5 font-medium text-slate-600 text-xs">Tarih</th>
+                    <th className="px-4 py-2.5 font-medium text-slate-600 text-xs">Tür</th>
+                    <th className="px-4 py-2.5 font-medium text-slate-600 text-xs text-right">Tutar</th>
+                    <th className="px-4 py-2.5 font-medium text-slate-600 text-xs">Açıklama</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="text-center py-10 text-slate-400 text-sm">
+                        Hareket bulunamadı
+                      </td>
+                    </tr>
+                  ) : (
+                    transactions.map((t) => (
+                      <tr key={t.id} className="border-b border-slate-100 hover:bg-slate-50">
+                        <td className="px-4 py-2.5 text-slate-500 text-xs whitespace-nowrap">
+                          {formatDateTime(t.created_at)}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <TransactionBadge type={t.type} />
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-medium text-slate-800">
+                          {formatTRY(t.amount)}
+                        </td>
+                        <td className="px-4 py-2.5 text-slate-500 text-xs">{t.description || '—'}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Sales History */}
       <Card>
-        <CardContent className="p-0 overflow-auto">
-          <table className="w-full text-sm">
-            <thead className="bg-slate-50 border-b border-slate-200">
-              <tr className="text-left">
-                <th className="px-4 py-3 font-medium text-slate-600">Firma</th>
-                <th className="px-4 py-3 font-medium text-slate-600">İlgili Kişi</th>
-                <th className="px-4 py-3 font-medium text-slate-600">Telefon</th>
-                <th className="px-4 py-3 font-medium text-slate-600">E-posta</th>
-                <th className="px-4 py-3 font-medium text-slate-600 text-right">Bakiye</th>
-                <th className="px-4 py-3"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {customers.length === 0 && <tr><td colSpan={6} className="text-center py-10 text-slate-500">Müşteri yok</td></tr>}
-              {customers.map(c => (
-                <tr key={c.id} className="border-b border-slate-100 hover:bg-slate-50">
-                  <td className="px-4 py-3 font-medium">{c.company_name}</td>
-                  <td className="px-4 py-3 text-slate-600">{c.contact_person || '-'}</td>
-                  <td className="px-4 py-3 text-slate-600">{c.phone || '-'}</td>
-                  <td className="px-4 py-3 text-slate-600">{c.email || '-'}</td>
-                  <td className={`px-4 py-3 text-right font-medium ${c.balance > 0 ? 'text-rose-600' : 'text-slate-700'}`}>{formatTRY(c.balance)}</td>
-                  <td className="px-4 py-3 text-right whitespace-nowrap">
-                    <Button size="icon" variant="ghost" title="Tahsilat" onClick={() => { setPay({ customer_id: c.id, amount: '', method: 'cash', notes: '' }); setPayOpen(true) }}><Wallet className="h-4 w-4 text-emerald-600" /></Button>
-                    <Button size="icon" variant="ghost" onClick={() => startEdit(c)}><Pencil className="h-4 w-4" /></Button>
-                    <Button size="icon" variant="ghost" onClick={() => remove(c.id)}><Trash2 className="h-4 w-4 text-rose-600" /></Button>
-                  </td>
+        <CardContent className="p-0">
+          <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wide">
+              Satış Geçmişi
+            </h2>
+            <span className="text-xs text-slate-400">{totalSaleCount} fatura</span>
+          </div>
+          <div className="overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 border-b border-slate-200">
+                <tr className="text-left">
+                  <th className="px-4 py-2.5 w-8" />
+                  <th className="px-4 py-2.5 font-medium text-slate-600 text-xs">Tarih</th>
+                  <th className="px-4 py-2.5 font-medium text-slate-600 text-xs">Fatura No</th>
+                  <th className="px-4 py-2.5 font-medium text-slate-600 text-xs text-right">Toplam</th>
+                  <th className="px-4 py-2.5 font-medium text-slate-600 text-xs text-right">Ödenen</th>
+                  <th className="px-4 py-2.5 font-medium text-slate-600 text-xs text-right">Kalan</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {sales.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="text-center py-12 text-slate-400 text-sm">
+                      Bu müşteriye ait satış bulunamadı
+                    </td>
+                  </tr>
+                ) : (
+                  sales
+                    .slice()
+                    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+                    .map((sale) => (
+                      <SaleRow key={sale.id} sale={sale} items={sale.items ?? []} />
+                    ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </CardContent>
       </Card>
-
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader><DialogTitle>{editing ? 'Müşteri Düzenle' : 'Yeni Müşteri'}</DialogTitle></DialogHeader>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div className="sm:col-span-2"><Label>Firma Adı *</Label><Input value={form.company_name} onChange={e => setForm({ ...form, company_name: e.target.value })} /></div>
-            <div><Label>İlgili Kişi</Label><Input value={form.contact_person} onChange={e => setForm({ ...form, contact_person: e.target.value })} /></div>
-            <div><Label>Telefon</Label><Input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} /></div>
-            <div><Label>E-posta</Label><Input value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></div>
-            <div><Label>Vergi Dairesi</Label><Input value={form.tax_office} onChange={e => setForm({ ...form, tax_office: e.target.value })} /></div>
-            <div><Label>Vergi No / TCKN</Label><Input value={form.tax_number} onChange={e => setForm({ ...form, tax_number: e.target.value })} /></div>
-            <div className="sm:col-span-2"><Label>Adres</Label><Textarea rows={2} value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} /></div>
-            <div className="sm:col-span-2"><Label>Notlar</Label><Textarea rows={2} value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Vazgeç</Button>
-            <Button onClick={save} className="bg-emerald-600 hover:bg-emerald-700">Kaydet</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={payOpen} onOpenChange={setPayOpen}>
-        <DialogContent>
-          <DialogHeader><DialogTitle>Tahsilat Al</DialogTitle></DialogHeader>
-          <div className="space-y-3">
-            <div><Label>Tutar (₺) *</Label><Input type="number" step="0.01" value={pay.amount} onChange={e => setPay({ ...pay, amount: e.target.value })} /></div>
-            <div><Label>Açıklama</Label><Input value={pay.notes} onChange={e => setPay({ ...pay, notes: e.target.value })} placeholder="Örn: Nakit tahsilat" /></div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPayOpen(false)}>Vazgeç</Button>
-            <Button onClick={recordPayment} className="bg-emerald-600 hover:bg-emerald-700">Kaydet</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   )
+}
+
+function InfoRow({ icon: Icon, label, value }) {
+  if (!value) return null
+  return (
+    <div className="flex items-start gap-2.5">
+      <Icon className="h-4 w-4 text-slate-400 mt-0.5 shrink-0" />
+      <div className="min-w-0">
+        <p className="text-xs text-slate-400 leading-none mb-0.5">{label}</p>
+        <p className="text-sm text-slate-700 break-words">{value}</p>
+      </div>
+    </div>
+  )
+}
+
+function TransactionBadge({ type }) {
+  const map = {
+    payment: { label: 'Ödeme', className: 'bg-emerald-100 text-emerald-700 hover:bg-emerald-100' },
+    invoice: { label: 'Fatura', className: 'bg-blue-100 text-blue-700 hover:bg-blue-100' },
+    refund: { label: 'İade', className: 'bg-amber-100 text-amber-700 hover:bg-amber-100' },
+    adjustment: { label: 'Düzeltme', className: 'bg-slate-100 text-slate-600 hover:bg-slate-100' },
+  }
+
+  const cfg = map[type] ?? {
+    label: type,
+    className: 'bg-slate-100 text-slate-600 hover:bg-slate-100',
+  }
+
+  return <Badge className={`text-xs ${cfg.className}`}>{cfg.label}</Badge>
 }
